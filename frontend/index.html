@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CONCOST Total Studio - Filee 1.10.2 아키텍처 기반 변환 대시보드</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="filee-theme">
+
+  <!-- =====================================================================
+       1. concost-tech-scheduler 스타일 임직원 로그인 모달 (미인증 시 화면 차단)
+       ===================================================================== -->
+  <div class="login-modal-overlay" id="login-modal-overlay">
+    <div class="login-split-card">
+      <!-- 좌측 브랜드 브리핑 패널 -->
+      <div class="login-brand-panel">
+        <div class="brand-top">
+          <span class="brand-tag">CONCOST · TECH INTELLIGENCE</span>
+          <h2>변환 토탈 스튜디오</h2>
+          <p class="brand-sub">사내 도면(CAD)·내역서(Excel)·180+ 미디어 통합 변환 시스템</p>
+        </div>
+        <div class="security-notice-box">
+          <div class="notice-title">🔒 임직원 보안 안내</div>
+          <p>본 시스템은 (주)콘코스트 사내 임직원 전용 변환 플랫폼입니다. 승인된 계정으로 로그인해 주세요.</p>
+          <div class="init-pwd-pill">※ 최초 접속 시 비밀번호는 <strong>1234</strong> 입니다.</div>
+        </div>
+        <div class="brand-footer-text">CONCOST Enterprise Engineering Cloud</div>
+      </div>
+
+      <!-- 우측 로그인 폼 패널 -->
+      <div class="login-form-panel">
+        <div class="form-header">
+          <h3>시스템 로그인</h3>
+          <p>사내 임직원 계정 정보를 입력하세요.</p>
+        </div>
+
+        <!-- 빠른 로그인 뱃지 -->
+        <div class="quick-login-wrap">
+          <span class="quick-label">빠른 계정 선택:</span>
+          <div class="quick-chips">
+            <button class="chip-btn" data-id="yjw">🔑 유종욱 실장</button>
+            <button class="chip-btn" data-id="pyj">🔑 박용진 수석</button>
+          </div>
+        </div>
+
+        <!-- 임직원 목록 드롭다운 -->
+        <div class="form-group">
+          <label for="employee-select">임직원 전체 명단에서 선택:</label>
+          <select id="employee-select" class="form-select">
+            <option value="">-- 본인의 이름/부서를 선택하세요 --</option>
+          </select>
+        </div>
+
+        <form id="login-form">
+          <div class="form-group">
+            <label for="login-id-input">사내 로그인 ID</label>
+            <input type="text" id="login-id-input" class="form-input" placeholder="예: yjw, kdk1225" required>
+          </div>
+
+          <div class="form-group">
+            <label for="login-pwd-input">비밀번호</label>
+            <div class="pwd-input-wrap">
+              <input type="password" id="login-pwd-input" class="form-input" placeholder="초기 비밀번호: 1234" value="1234" required>
+              <button type="button" class="btn-toggle-pwd" id="btn-toggle-pwd">👁</button>
+            </div>
+          </div>
+
+          <div class="form-error-msg hidden" id="login-error-msg"></div>
+
+          <button type="submit" class="btn-login-submit" id="btn-login-submit">
+            <span>시스템 로그인</span>
+            <span class="arrow-icon">➔</span>
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- =====================================================================
+       2. 비밀번호 변경 모달 (개인설정)
+       ===================================================================== -->
+  <div class="modal-backdrop hidden" id="pwd-modal-backdrop">
+    <div class="simple-modal-card">
+      <div class="modal-header">
+        <h4>비밀번호 변경</h4>
+        <button class="btn-close-modal" id="btn-close-pwd-modal">×</button>
+      </div>
+      <form id="change-pwd-form">
+        <div class="form-group">
+          <label>현재 비밀번호</label>
+          <input type="password" id="old-pwd-input" class="form-input" required>
+        </div>
+        <div class="form-group">
+          <label>새 비밀번호</label>
+          <input type="password" id="new-pwd-input" class="form-input" required>
+        </div>
+        <div class="form-group">
+          <label>새 비밀번호 확인</label>
+          <input type="password" id="new-pwd-confirm" class="form-input" required>
+        </div>
+        <div class="form-error-msg hidden" id="change-pwd-msg"></div>
+        <div class="modal-actions">
+          <button type="button" class="btn-secondary" id="btn-cancel-pwd">취소</button>
+          <button type="submit" class="btn-primary-sm">변경 저장</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- =====================================================================
+       3. 메인 스튜디오 레이아웃
+       ===================================================================== -->
+  <div class="studio-layout">
+    
+    <!-- 탑 네비게이션 & 브랜드 바 -->
+    <header class="studio-topbar">
+      <div class="brand-group">
+        <div class="brand-logo">
+          <span class="logo-symbol">⬡</span>
+          <span class="brand-name">CONCOST <strong>Filee</strong></span>
+        </div>
+        <div class="version-badge">v1.10.2 토탈 스튜디오</div>
+        <div class="zwcad-badge" id="zwcad-status-badge" title="CONCOST-Converter ZWCAD 가속 엔진">
+          <span class="zw-dot"></span>
+          <span id="zwcad-status-text">ZWCAD 엔진 확인 중...</span>
+        </div>
+        <div class="update-notice">
+          <span class="update-dot"></span>
+          <span>사내 전용 통합 변환 엔진 온라인</span>
+        </div>
+      </div>
+
+      <div class="topbar-actions">
+        <!-- 로그인 사용자 프로필 영역 -->
+        <div class="user-profile-badge" id="user-profile-badge">
+          <span class="user-avatar">👤</span>
+          <span class="user-info-text" id="header-user-name">로그인 대기</span>
+          <button class="btn-user-action" id="btn-user-menu" title="개인설정 / 로그아웃">⚙</button>
+        </div>
+        <!-- 사용자 팝오버 메뉴 -->
+        <div class="user-popover hidden" id="user-popover">
+          <div class="popover-user-title" id="popover-user-title">유종욱 실장</div>
+          <button class="popover-item" id="btn-open-change-pwd">🔒 비밀번호 변경</button>
+          <button class="popover-item logout" id="btn-logout">🚪 로그아웃</button>
+        </div>
+      </div>
+    </header>
+
+    <!-- [핵심 UI 개선] 3단계 비포-애프터 워크프로세스 가이드 바 -->
+    <div class="workflow-stepper-bar">
+      <div class="step-card active" id="step-indicator-1">
+        <div class="step-num">1</div>
+        <div class="step-info">
+          <div class="step-title">STEP 1. [BEFORE] 원본 파일 투입</div>
+          <div class="step-desc">도면, 내역서, 문서, 이미지 드롭</div>
+        </div>
+      </div>
+      <div class="step-arrow">➔</div>
+      <div class="step-card" id="step-indicator-2">
+        <div class="step-num">2</div>
+        <div class="step-info">
+          <div class="step-title">STEP 2. [TRANSFORM] 목표 포맷 선택</div>
+          <div class="step-desc">도넛 휠 또는 180+ 팔레트 클릭</div>
+        </div>
+      </div>
+      <div class="step-arrow">➔</div>
+      <div class="step-card" id="step-indicator-3">
+        <div class="step-num">3</div>
+        <div class="step-info">
+          <div class="step-title">STEP 3. [AFTER] 변환 실행 및 저장</div>
+          <div class="step-desc">실시간 진행 카드 및 원클릭 다운로드</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 프로필 탭 바 (Filee 상단 탭) -->
+    <nav class="profile-tabs-bar" id="profile-tabs">
+      <button class="tab-item active" data-profile="cad">
+        <span class="tab-text">CAD 도면</span>
+        <span class="tab-count">5</span>
+      </button>
+      <button class="tab-item" data-profile="documents">
+        <span class="tab-text">문서 / 한글</span>
+        <span class="tab-count">8</span>
+      </button>
+      <button class="tab-item" data-profile="spreadsheets">
+        <span class="tab-text">표 / 내역서</span>
+        <span class="tab-count">6</span>
+      </button>
+      <button class="tab-item" data-profile="images">
+        <span class="tab-text">이미지</span>
+        <span class="tab-count">12</span>
+      </button>
+      <button class="tab-item" data-profile="media_video">
+        <span class="tab-text">동영상</span>
+        <span class="tab-count">8</span>
+      </button>
+      <button class="tab-item" data-profile="media_audio">
+        <span class="tab-text">오디오</span>
+        <span class="tab-count">6</span>
+      </button>
+      <button class="tab-item" data-profile="ebooks">
+        <span class="tab-text">전자책 / 압축</span>
+        <span class="tab-count">7</span>
+      </button>
+      <button class="tab-item" data-profile="mixed">
+        <span class="tab-text">혼합 파일</span>
+        <span class="tab-count">16</span>
+      </button>
+      <button class="tab-item add-profile-btn" id="btn-add-profile">
+        <span>+ 새 프로필</span>
+      </button>
+    </nav>
+
+    <!-- 프로필 세부 설정 & 적용 확장자 태그 바 -->
+    <div class="profile-config-strip">
+      <div class="config-left">
+        <label class="toggle-switch">
+          <input type="checkbox" id="chk-mixed-selection" checked>
+          <span class="slider"></span>
+          <span class="toggle-label">여러 형식이 섞인 선택에 사용</span>
+        </label>
+      </div>
+
+      <div class="config-right">
+        <span class="strip-label">적용할 확장자:</span>
+        <div class="ext-tags-container" id="ext-tags-container">
+          <!-- 동적 태그 -->
+        </div>
+      </div>
+    </div>
+
+    <!-- [핵심 UI 개선] 비포-에프터 파이프라인 스테이지 (3열: Before ➔ Donut Wheel ➔ After) -->
+    <div class="pipeline-studio-stage">
+      
+      <!-- 1. [BEFORE] 투입 파일 상태 카드 -->
+      <div class="stage-col before-col">
+        <div class="col-badge">BEFORE 원본 파일</div>
+        <div class="before-card-content" id="before-card-content">
+          <div class="empty-placeholder">
+            <div class="ph-icon">📂</div>
+            <div class="ph-title">대기 중인 파일 없음</div>
+            <div class="ph-desc">가운데 도넛 휠로 파일을 드래그 앤 드롭하세요</div>
+          </div>
+          <div class="file-loaded-view hidden" id="before-loaded-view">
+            <div class="file-format-badge" id="before-ext-badge">PDF</div>
+            <div class="file-title-text" id="before-filename">drawing.pdf</div>
+            <div class="file-size-text" id="before-filesize">2.4 MB</div>
+            <div class="file-engine-match" id="before-engine-match">✓ CAD 도면 엔진 자동 매칭</div>
+            <button class="btn-change-file" id="btn-change-file">파일 변경 / 제거</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. [TRANSFORM] 중앙 인터랙티브 도넛 변환 휠 -->
+      <div class="stage-col donut-col">
+        <div class="col-badge active">TRANSFORM 변환 휠 (포맷 선택)</div>
+        <div class="donut-stage" id="donut-stage">
+          <div class="donut-orbit" id="donut-orbit"></div>
+          <div class="donut-center-drop" id="donut-center-drop">
+            <input type="file" id="file-uploader" class="hidden-input" multiple>
+            <div class="center-content">
+              <div class="center-icon">📥</div>
+              <div class="center-title">파일 드롭 / 클릭</div>
+              <div class="center-sub" id="donut-drop-sub">여기에 파일을 놓으세요</div>
+              <span class="btn-browse-pill">컴퓨터에서 선택</span>
+            </div>
+          </div>
+        </div>
+        
+        <!-- 하단 도면 축척 및 DPI 옵션 바 -->
+        <div class="donut-params-bar">
+          <div class="param-item">
+            <label for="sel-scale">도면 축척 (Scale):</label>
+            <select id="sel-scale" class="param-select">
+              <option value="auto" selected>✓ 자동 치수선 감지 보정</option>
+              <option value="1.0">1:1 (원본 종이 mm)</option>
+              <option value="100.0">1:100 (건축 평면)</option>
+              <option value="200.0">1:200 (구조 배치)</option>
+              <option value="400.0">1:400 (배치도/GA)</option>
+            </select>
+          </div>
+          <div class="param-item">
+            <label for="sel-dpi">해상도 (DPI):</label>
+            <select id="sel-dpi" class="param-select">
+              <option value="300" selected>300 DPI</option>
+              <option value="150">150 DPI</option>
+              <option value="600">600 DPI</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3. [AFTER] 목표 포맷 및 즉시 실행 카드 -->
+      <div class="stage-col after-col">
+        <div class="col-badge success">AFTER 변환 목표 & 실행</div>
+        <div class="after-card-content">
+          <div class="target-format-display">
+            <div class="target-title-sub">선택된 변환 포맷</div>
+            <div class="target-big-badge" id="after-target-badge">DXF</div>
+            <div class="target-desc" id="after-target-desc">AutoCAD 호환 표준 R2010 벡터 도면</div>
+          </div>
+
+          <div class="convert-action-wrap">
+            <button class="btn-big-convert" id="btn-run-convert" disabled>
+              <span class="btn-icon">⚡</span>
+              <span class="btn-label">이 포맷으로 변환 시작</span>
+            </button>
+            <div class="action-hint" id="action-hint">※ 먼저 왼쪽(또는 도넛)에 파일을 넣어주세요</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- 우측 180+ 지원 포맷 타일 팔레트 (Available Formats Grid) 바텀 드로어 또는 접이식 패널 -->
+    <section class="formats-palette-section">
+      <div class="palette-header">
+        <div class="palette-title">
+          <h3>전체 180+ 지원 포맷 팔레트 (Format Tile Palette)</h3>
+          <span class="palette-count">원하는 포맷을 클릭하여 즉시 타겟으로 지정하세요</span>
+        </div>
+        <div class="search-box">
+          <input type="text" id="format-search-input" placeholder="포맷 검색 (예: dxf, dwg, xlsx, webp, mp4)...">
+        </div>
+      </div>
+      <div class="tiles-scroll-area horizontal-grid" id="tiles-grid"></div>
+    </section>
+
+    <!-- 하단: 실시간 변환 진행 카드 리스트 (One Progress Card Per Conversion) -->
+    <section class="progress-cards-section">
+      <div class="section-top">
+        <div class="section-title-wrap">
+          <h3>실시간 변환 결과 큐 (Conversion Progress Cards)</h3>
+          <span class="queue-status-text" id="queue-status-text">대기 중인 작업 없음</span>
+        </div>
+        <button class="btn-clear-queue" id="btn-clear-queue">목록 비우기</button>
+      </div>
+      <div class="progress-cards-grid" id="progress-cards-grid"></div>
+    </section>
+
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

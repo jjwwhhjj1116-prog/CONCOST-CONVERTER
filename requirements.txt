@@ -1,0 +1,16 @@
+# CONCOST Total Studio 백엔드 핵심 의존성 목록
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+python-multipart>=0.0.9
+openpyxl>=3.1.2
+ezdxf>=1.2.0
+pdfplumber>=0.10.0
+pypdf>=4.1.0
+pillow>=10.2.0
+reportlab>=4.1.0
+
+# CONCOST-Converter-0.2.2 CAD & DWG 정밀 엔진 의존성
+PyMuPDF>=1.24.0
+shapely>=2.0.0
+fonttools>=4.50.0
+numpy>=1.26.0
