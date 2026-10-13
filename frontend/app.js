@@ -143,7 +143,29 @@ document.addEventListener("DOMContentLoaded", () => {
   // 1. 임직원 로그인 시스템 초기화 및 ZWCAD 가속 확인
   // =========================================================================
   initAuth();
-  checkZwcadStatus();
+
+  // 로그인 토큰을 붙여 API 호출
+  function authToken() {
+    return localStorage.getItem("concost_converter_token") || "";
+  }
+  async function apiFetch(url, opts = {}) {
+    const headers = new Headers(opts.headers || {});
+    headers.set("Authorization", `Bearer ${authToken()}`);
+    const res = await fetch(url, { ...opts, headers });
+    if (res.status === 401) forceRelogin("로그인이 만료되었습니다. 다시 로그인해주세요.");
+    return res;
+  }
+  function forceRelogin(msg) {
+    localStorage.removeItem("concost_converter_user");
+    localStorage.removeItem("concost_converter_token");
+    currentUser = null;
+    loginOverlay.classList.remove("hidden");
+    headerUserName.textContent = "로그인 대기";
+    if (msg) {
+      loginErrorMsg.textContent = msg;
+      loginErrorMsg.classList.remove("hidden");
+    }
+  }
 
   async function checkZwcadStatus() {
     const zwBadge = document.getElementById("zwcad-status-badge");
@@ -151,62 +173,51 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!zwBadge || !zwText) return;
 
     try {
-      const res = await fetch("/api/cad/zwcad-status");
+      const res = await apiFetch("/api/cad/zwcad-status");
+      if (!res.ok) throw new Error("engine offline");
       const data = await res.json();
       if (data.available && data.versions && data.versions.length > 0) {
         const topVer = data.versions[0].replace("ZWCAD.Application.", "ZWCAD ");
         zwText.textContent = `⚡ ${topVer} DWG 연동`;
         zwBadge.style.borderColor = "rgba(56, 189, 248, 0.6)";
-        zwBadge.title = `CONCOST-Converter ZWCAD 가속 연동: ${data.versions.join(", ")}`;
+        zwBadge.title = `CONCOST-Converter ZWCAD 연동: ${data.versions.join(", ")}`;
       } else {
-        zwText.textContent = "📐 DXF 정밀 벡터";
+        zwText.textContent = "📐 DXF 전용 (ZWCAD 없음)";
         zwBadge.style.borderColor = "rgba(148, 163, 184, 0.3)";
-        zwBadge.title = "AutoCAD 표준 DXF 정밀 벡터 모드";
       }
     } catch (e) {
-      zwText.textContent = "📐 DXF 정밀 모드";
+      zwText.textContent = "⛔ 변환 엔진 오프라인";
+      zwBadge.style.borderColor = "rgba(239, 68, 68, 0.5)";
+      zwBadge.title = "사내 엔진 PC에서 start_engine.bat 실행 필요";
     }
   }
 
   function initAuth() {
-    // 저장된 세션 검사
+    // 저장된 세션 검사 (토큰이 없으면 재로그인)
     const savedUser = localStorage.getItem("concost_converter_user");
-    if (savedUser) {
+    if (savedUser && localStorage.getItem("concost_converter_token")) {
       try {
         currentUser = JSON.parse(savedUser);
         onLoginSuccess(currentUser, false);
+        checkZwcadStatus();
       } catch (e) {
         localStorage.removeItem("concost_converter_user");
       }
     }
 
-    // 임직원 목록 로드 (백엔드 API 우선, 실패 시 정적 employees.json 폴백)
+    // 임직원 목록 로드 (D1)
     async function loadEmployees() {
       try {
-        let res = await fetch("/api/auth/employees");
-        let list = [];
-        if (res.ok) {
-          const data = await res.json();
-          list = data.employees || [];
-        } else {
-          throw new Error("API 비활성");
-        }
-        renderEmployeeDropdown(list);
-      } catch (e) {
-        // Cloudflare Pages 정적 환경 폴백
-        try {
-          const res = await fetch("/employees.json");
-          const list = await res.json();
-          renderEmployeeDropdown(list);
-        } catch (err) {
-          console.log("임직원 명단 로드 실패:", err);
-        }
+        const res = await fetch("/api/auth/employees");
+        const data = await res.json();
+        renderEmployeeDropdown(data.employees || []);
+      } catch (err) {
+        console.log("임직원 명단 로드 실패:", err);
       }
     }
 
     function renderEmployeeDropdown(list) {
       if (!list || list.length === 0) return;
-      window.__concost_employees = list;
       employeeSelect.innerHTML = `<option value="">-- 임직원(${list.length}명) 선택 시 자동입력 --</option>`;
       list.forEach((emp) => {
         const opt = document.createElement("option");
@@ -255,33 +266,15 @@ document.addEventListener("DOMContentLoaded", () => {
           body: JSON.stringify({ login_id: lid, password: pwd }),
         });
 
-        if (res.ok) {
-          const data = await res.json();
-          currentUser = data.user;
-          localStorage.setItem("concost_converter_user", JSON.stringify(currentUser));
-          onLoginSuccess(currentUser, true);
-          return;
-        } else if (res.status === 401) {
-          const errData = await res.json();
-          throw new Error(errData.detail || "아이디 또는 비밀번호가 올바르지 않습니다.");
-        }
-        throw new Error("서버 응답 오류 (오프라인 모드 전환)");
-      } catch (err) {
-        // Cloudflare Pages 정적 배포 오프라인 인증 폴백
-        const empList = window.__concost_employees || [];
-        const matched = empList.find((x) => x.login_id.toLowerCase() === lid.toLowerCase());
-        if (matched && pwd === "1234") {
-          currentUser = {
-            login_id: matched.login_id,
-            name: matched.name,
-            department: matched.department,
-            rank: matched.rank,
-          };
-          localStorage.setItem("concost_converter_user", JSON.stringify(currentUser));
-          onLoginSuccess(currentUser, true);
-          return;
-        }
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `로그인 실패 (HTTP ${res.status})`);
 
+        currentUser = data.user;
+        localStorage.setItem("concost_converter_user", JSON.stringify(currentUser));
+        localStorage.setItem("concost_converter_token", data.token || "");
+        onLoginSuccess(currentUser, true);
+        checkZwcadStatus();
+      } catch (err) {
         loginErrorMsg.textContent = err.message || "로그인 정보를 확인해주세요.";
         loginErrorMsg.classList.remove("hidden");
       }
@@ -296,11 +289,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // 로그아웃
     btnLogout.addEventListener("click", () => {
-      localStorage.removeItem("concost_converter_user");
-      currentUser = null;
-      loginOverlay.classList.remove("hidden");
       userPopover.classList.add("hidden");
-      headerUserName.textContent = "로그인 대기";
+      forceRelogin("");
     });
 
     // 비밀번호 변경 모달 열기/닫기
@@ -675,14 +665,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const startTime = performance.now();
 
-    fetch("/api/convert", {
-      method: "POST",
-      body: formData,
-    })
-      .then((res) => {
+    // Pages 프록시(/api/convert) → Cloudflare Tunnel → 사내 PC CONCOST 엔진
+    apiFetch("/api/convert", { method: "POST", body: formData })
+      .then(async (res) => {
         clearInterval(timer);
-        if (!res.ok) throw new Error("서버 변환 실패");
-        return res.json();
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `서버 변환 실패 (HTTP ${res.status})`);
+        return data;
       })
       .then((data) => {
         const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
@@ -691,13 +680,15 @@ document.addEventListener("DOMContentLoaded", () => {
         statusEl.className = "card-status-badge success";
         statusEl.textContent = "변환 완료";
 
-        let engineDesc = "Total Core";
-        if (data.metadata && data.metadata.engine) engineDesc = data.metadata.engine;
-        metaEl.textContent = `${(data.file_size_bytes / 1024).toFixed(1)} KB · ${elapsed}초 · ${engineDesc}`;
+        const m = data.metadata || {};
+        const detail = m.entities != null ? ` · 객체 ${m.entities}개` : "";
+        metaEl.textContent = `${(data.file_size_bytes / 1024).toFixed(1)} KB · ${elapsed}초 · ${m.engine || ""}${detail}`;
 
-        actionsEl.innerHTML = `
-          <a href="${data.download_url}" download class="card-btn-download">다운로드 ➔</a>
-        `;
+        // <a download>은 헤더를 못 붙이므로 토큰을 쿼리로 전달 (프록시에서 제거 후 전달)
+        const sep = data.download_url.includes("?") ? "&" : "?";
+        const link = `${data.download_url}${sep}t=${encodeURIComponent(authToken())}`;
+        const outName = data.download_url.split("/").pop();
+        actionsEl.innerHTML = `<a href="${link}" download="${decodeURIComponent(outName)}" class="card-btn-download">다운로드 ➔</a>`;
         queueStatusText.textContent = "변환 완료";
       })
       .catch((err) => {

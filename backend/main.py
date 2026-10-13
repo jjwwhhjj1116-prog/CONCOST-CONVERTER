@@ -38,6 +38,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 터널 주소는 공개 URL이므로, ENGINE_KEY가 설정되면 변환/다운로드 API에 키를 요구
+ENGINE_KEY: str = os.environ.get("ENGINE_KEY", "")
+
+
+@app.middleware("http")
+async def engine_key_guard(request, call_next):
+    """Cloudflare 프록시가 붙여주는 X-Engine-Key 검사 (로컬 직접 접속은 키 미설정 시 허용)"""
+    from fastapi.responses import JSONResponse
+
+    path = request.url.path
+    via_tunnel = "cf-connecting-ip" in request.headers  # Cloudflare 엣지가 항상 덮어쓰는 헤더
+    if ENGINE_KEY and via_tunnel and path.startswith("/api/") and path != "/api/health":
+        if request.headers.get("x-engine-key") != ENGINE_KEY:
+            return JSONResponse(status_code=403, content={"detail": "엔진 접근 키가 올바르지 않습니다."})
+    return await call_next(request)
+
 FRONTEND_DIR = Path("e:/■ 개발_TF팀/변환 토탈웹/frontend")
 UPLOAD_DIR = Path("e:/■ 개발_TF팀/변환 토탈웹/storage/uploads")
 OUTPUT_DIR = Path("e:/■ 개발_TF팀/변환 토탈웹/storage/outputs")
@@ -261,13 +277,12 @@ async def convert_file(
             out_file_path = zip_out
             meta = {"engine": "Deflate Zip Engine", "archived_files": 1}
 
-        # 6. 범용 포맷 폴백 (미디어/문서 등 모의 변환 또는 복사 래핑)
+        # 6. 미구현 경로: 원본 복사로 성공을 위장하지 않고 명시적으로 실패 처리
         else:
-            # 지원하지 않거나 범용 래퍼로 텍스트/바이너리 출력 생성
-            fallback_out = task_output_dir / f"{input_file_path.stem}.{tgt}"
-            shutil.copyfile(input_file_path, fallback_out)
-            out_file_path = fallback_out
-            meta = {"engine": "Filee Generic Pipeline", "note": "Format routed"}
+            raise HTTPException(
+                status_code=422,
+                detail=f"아직 지원하지 않는 변환 경로입니다: {ext.upper()} -> {tgt.upper()}",
+            )
 
         file_size = out_file_path.stat().st_size if out_file_path.exists() else 0
         download_url = f"/api/download/{task_id}/{out_file_path.name}"

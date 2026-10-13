@@ -45,3 +45,11 @@ Thumbs.db
 !.dev.vars.example
 .env*
 !.env.example
+
+# 엔진 비밀키
+.engine.env
+storage/users_db.json
+.wrangler/
+CONNECT_TALK_*.xlsx
+backend/tests/e2e_out/
+schema.sql
