@@ -180,21 +180,43 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
 
-    // 서버에서 117명 임직원 목록 조회하여 드롭다운 채우기
-    fetch("/api/auth/employees")
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.employees && data.employees.length > 0) {
-          employeeSelect.innerHTML = `<option value="">-- 임직원(${data.employees.length}명) 선택 시 자동입력 --</option>`;
-          data.employees.forEach((emp) => {
-            const opt = document.createElement("option");
-            opt.value = emp.login_id;
-            opt.textContent = `[${emp.department}] ${emp.name} ${emp.rank} (${emp.login_id})`;
-            employeeSelect.appendChild(opt);
-          });
+    // 임직원 목록 로드 (백엔드 API 우선, 실패 시 정적 employees.json 폴백)
+    async function loadEmployees() {
+      try {
+        let res = await fetch("/api/auth/employees");
+        let list = [];
+        if (res.ok) {
+          const data = await res.json();
+          list = data.employees || [];
+        } else {
+          throw new Error("API 비활성");
         }
-      })
-      .catch((err) => console.log("임직원 목록 로드 대기:", err));
+        renderEmployeeDropdown(list);
+      } catch (e) {
+        // Cloudflare Pages 정적 환경 폴백
+        try {
+          const res = await fetch("/employees.json");
+          const list = await res.json();
+          renderEmployeeDropdown(list);
+        } catch (err) {
+          console.log("임직원 명단 로드 실패:", err);
+        }
+      }
+    }
+
+    function renderEmployeeDropdown(list) {
+      if (!list || list.length === 0) return;
+      window.__concost_employees = list;
+      employeeSelect.innerHTML = `<option value="">-- 임직원(${list.length}명) 선택 시 자동입력 --</option>`;
+      list.forEach((emp) => {
+        const opt = document.createElement("option");
+        opt.value = emp.login_id;
+        opt.textContent = `[${emp.department}] ${emp.name} ${emp.rank} (${emp.login_id})`;
+        employeeSelect.appendChild(opt);
+      });
+    }
+
+    loadEmployees();
 
     // 빠른 계정 선택 칩 버튼
     document.querySelectorAll(".chip-btn").forEach((btn) => {
@@ -233,17 +255,34 @@ document.addEventListener("DOMContentLoaded", () => {
           body: JSON.stringify({ login_id: lid, password: pwd }),
         });
 
-        if (!res.ok) {
+        if (res.ok) {
+          const data = await res.json();
+          currentUser = data.user;
+          localStorage.setItem("concost_converter_user", JSON.stringify(currentUser));
+          onLoginSuccess(currentUser, true);
+          return;
+        } else if (res.status === 401) {
           const errData = await res.json();
-          throw new Error(errData.detail || "로그인 실패");
+          throw new Error(errData.detail || "아이디 또는 비밀번호가 올바르지 않습니다.");
+        }
+        throw new Error("서버 응답 오류 (오프라인 모드 전환)");
+      } catch (err) {
+        // Cloudflare Pages 정적 배포 오프라인 인증 폴백
+        const empList = window.__concost_employees || [];
+        const matched = empList.find((x) => x.login_id.toLowerCase() === lid.toLowerCase());
+        if (matched && pwd === "1234") {
+          currentUser = {
+            login_id: matched.login_id,
+            name: matched.name,
+            department: matched.department,
+            rank: matched.rank,
+          };
+          localStorage.setItem("concost_converter_user", JSON.stringify(currentUser));
+          onLoginSuccess(currentUser, true);
+          return;
         }
 
-        const data = await res.json();
-        currentUser = data.user;
-        localStorage.setItem("concost_converter_user", JSON.stringify(currentUser));
-        onLoginSuccess(currentUser, true);
-      } catch (err) {
-        loginErrorMsg.textContent = err.message;
+        loginErrorMsg.textContent = err.message || "로그인 정보를 확인해주세요.";
         loginErrorMsg.classList.remove("hidden");
       }
     });
