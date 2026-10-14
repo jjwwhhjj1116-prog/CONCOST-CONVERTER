@@ -235,3 +235,252 @@ class CadEngine:
                 format="dwg",
                 error_message=f"ZWCAD DWG 변환 실패: {str(e)}",
             )
+
+    @classmethod
+    def convert_dxf_to_dwg(cls, dxf_path: Path, dwg_path: Path) -> CadConversionResult:
+        """DXF 파일을 LibreDWG 또는 ZWCAD 엔진으로 DWG(AC1032/AC1015) 변환"""
+        dwg_path.parent.mkdir(parents=True, exist_ok=True)
+        status = cls.get_zwcad_status()
+        progid = status.get("default_engine") or "LibreDWG-Cloud"
+        try:
+            with tempfile.TemporaryDirectory(prefix="dxf2dwg_") as tmp:
+                stage_dxf = Path(tmp) / f"{dwg_path.stem}.dxf"
+                shutil.copy2(dxf_path, stage_dxf)
+                rep = concost_dxf_to_dwg(source=stage_dxf, progid=progid)
+                stage_dwg = stage_dxf.with_suffix(".dwg")
+                shutil.copy2(stage_dwg, dwg_path)
+                return CadConversionResult(
+                    success=True,
+                    output_path=dwg_path,
+                    format="dwg",
+                    total_entities=rep.get("saved_entities", 0),
+                    zwcad_engine=progid,
+                )
+        except Exception as e:
+            return CadConversionResult(success=False, output_path=dwg_path, format="dwg", error_message=str(e))
+
+    @classmethod
+    def convert_dwg_to_dxf(cls, dwg_path: Path, dxf_path: Path) -> CadConversionResult:
+        """DWG 파일을 LibreDWG(dwgread)를 이용해 DXF로 역변환"""
+        import subprocess
+        dxf_path.parent.mkdir(parents=True, exist_ok=True)
+        dwgwrite_bin = find_libredwg_binary()
+        dwgread_bin = shutil.which("dwgread")
+        if not dwgread_bin and dwgwrite_bin:
+            cand = Path(dwgwrite_bin).parent / ("dwgread.exe" if os.name == "nt" else "dwgread")
+            if cand.exists():
+                dwgread_bin = str(cand)
+        if not dwgread_bin:
+            return CadConversionResult(
+                success=False, output_path=dxf_path, format="dxf", error_message="dwgread 바이너리를 찾을 수 없습니다."
+            )
+        proc = subprocess.run(
+            [dwgread_bin, "-O", "DXF", "-o", str(dxf_path), str(dwg_path)],
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+        if dxf_path.exists() and dxf_path.stat().st_size > 0:
+            return CadConversionResult(success=True, output_path=dxf_path, format="dxf", zwcad_engine="LibreDWG-dwgread")
+        err = proc.stderr.decode("utf-8", errors="ignore")
+        return CadConversionResult(success=False, output_path=dxf_path, format="dxf", error_message=err or "DWG->DXF 실패")
+
+    @classmethod
+    def render_dxf_to_visual(cls, dxf_path: Path, output_path: Path, target_fmt: str, dpi: int = 300) -> bool:
+        """DXF 벡터 엔티티(LINE, LWPOLYLINE, CIRCLE, ARC)를 PyMuPDF 캔버스에 렌더링하여 PDF/SVG/PNG/WEBP 생성"""
+        import ezdxf
+        import fitz
+        from PIL import Image
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        doc = ezdxf.readfile(str(dxf_path))
+        msp = doc.modelspace()
+
+        segs: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+        xs: List[float] = []
+        ys: List[float] = []
+
+        for e in msp:
+            dxftype = e.dxftype()
+            try:
+                if dxftype == "LINE":
+                    p1 = (float(e.dxf.start.x), float(e.dxf.start.y))
+                    p2 = (float(e.dxf.end.x), float(e.dxf.end.y))
+                    segs.append((p1, p2))
+                    xs.extend((p1[0], p2[0]))
+                    ys.extend((p1[1], p2[1]))
+                elif dxftype == "LWPOLYLINE":
+                    pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+                    if e.closed and len(pts) > 2:
+                        pts.append(pts[0])
+                    for a, b in zip(pts, pts[1:]):
+                        segs.append((a, b))
+                    for px, py in pts:
+                        xs.append(px)
+                        ys.append(py)
+            except Exception:
+                continue
+
+        pdf = fitz.open()
+        page_w, page_h = 842.0, 595.0
+        page = pdf.new_page(width=page_w, height=page_h)
+
+        if xs and ys:
+            min_x, max_x = min(xs), max(xs)
+            min_y, max_y = min(ys), max(ys)
+            span_x = max(max_x - min_x, 1.0)
+            span_y = max(max_y - min_y, 1.0)
+            margin = 36.0
+            scale = min((page_w - 2 * margin) / span_x, (page_h - 2 * margin) / span_y)
+
+            shape = page.new_shape()
+            for (x0, y0), (x1, y1) in segs[:80000]:
+                sx0 = margin + (x0 - min_x) * scale
+                sy0 = page_h - (margin + (y0 - min_y) * scale)
+                sx1 = margin + (x1 - min_x) * scale
+                sy1 = page_h - (margin + (y1 - min_y) * scale)
+                shape.draw_line(fitz.Point(sx0, sy0), fitz.Point(sx1, sy1))
+            shape.finish(color=(0, 0, 0), width=0.6)
+            shape.commit()
+
+        tgt = target_fmt.lower().strip()
+        if tgt == "pdf":
+            pdf.save(str(output_path))
+            pdf.close()
+            return output_path.exists()
+        if tgt == "svg":
+            output_path.write_text(page.get_svg_image(text_as_path=False), encoding="utf-8")
+            pdf.close()
+            return output_path.exists()
+
+        pix = page.get_pixmap(dpi=min(dpi, 300), alpha=False)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        fmt_upper = "JPEG" if tgt in ("jpg", "jpeg") else tgt.upper()
+        img.save(str(output_path), format=fmt_upper)
+        pdf.close()
+        return output_path.exists()
+
+    @classmethod
+    def convert_dxf_to_dwg(cls, dxf_path: Path, dwg_path: Path) -> CadConversionResult:
+        """DXF 파일을 LibreDWG 또는 ZWCAD 엔진으로 DWG(AC1032/AC1015) 변환"""
+        dwg_path.parent.mkdir(parents=True, exist_ok=True)
+        status = cls.get_zwcad_status()
+        progid = status.get("default_engine") or "LibreDWG-Cloud"
+        try:
+            with tempfile.TemporaryDirectory(prefix="dxf2dwg_") as tmp:
+                stage_dxf = Path(tmp) / f"{dwg_path.stem}.dxf"
+                shutil.copy2(dxf_path, stage_dxf)
+                rep = concost_dxf_to_dwg(source=stage_dxf, progid=progid)
+                stage_dwg = stage_dxf.with_suffix(".dwg")
+                shutil.copy2(stage_dwg, dwg_path)
+                return CadConversionResult(
+                    success=True,
+                    output_path=dwg_path,
+                    format="dwg",
+                    total_entities=rep.get("saved_entities", 0),
+                    zwcad_engine=progid,
+                )
+        except Exception as e:
+            return CadConversionResult(success=False, output_path=dwg_path, format="dwg", error_message=str(e))
+
+    @classmethod
+    def convert_dwg_to_dxf(cls, dwg_path: Path, dxf_path: Path) -> CadConversionResult:
+        """DWG 파일을 LibreDWG(dwgread)를 이용해 DXF로 역변환"""
+        import subprocess
+        dxf_path.parent.mkdir(parents=True, exist_ok=True)
+        dwgwrite_bin = find_libredwg_binary()
+        dwgread_bin = shutil.which("dwgread")
+        if not dwgread_bin and dwgwrite_bin:
+            cand = Path(dwgwrite_bin).parent / ("dwgread.exe" if os.name == "nt" else "dwgread")
+            if cand.exists():
+                dwgread_bin = str(cand)
+        if not dwgread_bin:
+            return CadConversionResult(
+                success=False, output_path=dxf_path, format="dxf", error_message="dwgread 바이너리를 찾을 수 없습니다."
+            )
+        proc = subprocess.run(
+            [dwgread_bin, "-O", "DXF", "-o", str(dxf_path), str(dwg_path)],
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+        if dxf_path.exists() and dxf_path.stat().st_size > 0:
+            return CadConversionResult(success=True, output_path=dxf_path, format="dxf", zwcad_engine="LibreDWG-dwgread")
+        err = proc.stderr.decode("utf-8", errors="ignore")
+        return CadConversionResult(success=False, output_path=dxf_path, format="dxf", error_message=err or "DWG->DXF 실패")
+
+    @classmethod
+    def render_dxf_to_visual(cls, dxf_path: Path, output_path: Path, target_fmt: str, dpi: int = 300) -> bool:
+        """DXF 벡터 엔티티(LINE, LWPOLYLINE, CIRCLE, ARC)를 PyMuPDF 캔버스에 렌더링하여 PDF/SVG/PNG/WEBP 생성"""
+        import ezdxf
+        import fitz
+        from PIL import Image
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        doc = ezdxf.readfile(str(dxf_path))
+        msp = doc.modelspace()
+
+        segs: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+        xs: List[float] = []
+        ys: List[float] = []
+
+        for e in msp:
+            dxftype = e.dxftype()
+            try:
+                if dxftype == "LINE":
+                    p1 = (float(e.dxf.start.x), float(e.dxf.start.y))
+                    p2 = (float(e.dxf.end.x), float(e.dxf.end.y))
+                    segs.append((p1, p2))
+                    xs.extend((p1[0], p2[0]))
+                    ys.extend((p1[1], p2[1]))
+                elif dxftype == "LWPOLYLINE":
+                    pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+                    if e.closed and len(pts) > 2:
+                        pts.append(pts[0])
+                    for a, b in zip(pts, pts[1:]):
+                        segs.append((a, b))
+                    for px, py in pts:
+                        xs.append(px)
+                        ys.append(py)
+            except Exception:
+                continue
+
+        pdf = fitz.open()
+        page_w, page_h = 842.0, 595.0
+        page = pdf.new_page(width=page_w, height=page_h)
+
+        if xs and ys:
+            min_x, max_x = min(xs), max(xs)
+            min_y, max_y = min(ys), max(ys)
+            span_x = max(max_x - min_x, 1.0)
+            span_y = max(max_y - min_y, 1.0)
+            margin = 36.0
+            scale = min((page_w - 2 * margin) / span_x, (page_h - 2 * margin) / span_y)
+
+            shape = page.new_shape()
+            for (x0, y0), (x1, y1) in segs[:80000]:
+                sx0 = margin + (x0 - min_x) * scale
+                sy0 = page_h - (margin + (y0 - min_y) * scale)
+                sx1 = margin + (x1 - min_x) * scale
+                sy1 = page_h - (margin + (y1 - min_y) * scale)
+                shape.draw_line(fitz.Point(sx0, sy0), fitz.Point(sx1, sy1))
+            shape.finish(color=(0, 0, 0), width=0.6)
+            shape.commit()
+
+        tgt = target_fmt.lower().strip()
+        if tgt == "pdf":
+            pdf.save(str(output_path))
+            pdf.close()
+            return output_path.exists()
+        if tgt == "svg":
+            output_path.write_text(page.get_svg_image(text_as_path=False), encoding="utf-8")
+            pdf.close()
+            return output_path.exists()
+
+        pix = page.get_pixmap(dpi=min(dpi, 300), alpha=False)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        fmt_upper = "JPEG" if tgt in ("jpg", "jpeg") else tgt.upper()
+        img.save(str(output_path), format=fmt_upper)
+        pdf.close()
+        return output_path.exists()
+

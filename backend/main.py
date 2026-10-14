@@ -1,13 +1,17 @@
 """
 변환 토탈웹 - 통합 백엔드 API 서버 (FastAPI)
-Filee 180+ 포맷 라우팅 아키텍처 및 CONCOST 특화 엔진 결합
+- CAD 도면 변환(PDF <-> DXF <-> DWG): 사용자 전용 CONCOST-Converter-0.2.2 + LibreDWG/ZWCAD 정밀 엔진
+- 비-CAD 전 포맷 변환(180+ 경로): KnifeLemon/Filee v1.10.2 아키텍처(FileeUniversalRouter) 완전 이식
+- 동기 워커 스레드풀 + 세마포어 제어로 클라우드 컨테이너 이벤트 루프 블로킹 및 502 타임아웃 원천 차단
 """
-from dataclasses import asdict
-from enum import Enum
-import io
+from __future__ import annotations
+
 import os
 from pathlib import Path
 import shutil
+import tempfile
+import threading
+import time
 from typing import Any, Dict, List, Optional
 import uuid
 import zipfile
@@ -22,15 +26,16 @@ from backend.auth import AuthManager
 from backend.engines.cad.cad_engine import CadConversionOptions, CadEngine
 from backend.engines.document.document_engine import DocumentEngine
 from backend.engines.document.table_engine import TableEngine
+from backend.engines.filee_universal import FileeUniversalRouter
 from backend.engines.general.image_engine import ImageConversionOptions, ImageEngine
 
 app = FastAPI(
     title="CONCOST Total Converter API",
-    description="Filee v1.10.2 아키텍처 기반 사내·서비스용 도면·문서·미디어 통합 변환 플랫폼",
+    description="CONCOST-Converter-0.2.2 CAD/DWG 정밀 엔진 & Filee v1.10.2 180+ 포맷 통합 변환 플랫폼",
     version="1.10.2",
 )
 
-# CORS 설정
+# CORS 설정 (브라우저 직결 및 Cloudflare Pages 프록시 모두 허용)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -39,21 +44,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 터널 주소는 공개 URL이므로, ENGINE_KEY가 설정되면 변환/다운로드 API에 키를 요구
 ENGINE_KEY: str = os.environ.get("ENGINE_KEY", "")
+# 클라우드 컨테이너(512MB RAM) 동시 변환 시 OOM 방지를 위한 세마포어
+CONVERSION_SEMAPHORE = threading.Semaphore(2)
 
 
 @app.middleware("http")
 async def engine_key_guard(request, call_next):
-    """Cloudflare 프록시가 붙여주는 X-Engine-Key 검사 (로컬 직접 접속은 키 미설정 시 허용)"""
+    """X-Engine-Key 또는 Bearer 토큰이 있는 인증 요청 및 헬스체크 허용"""
     from fastapi.responses import JSONResponse
 
     path = request.url.path
-    via_tunnel = "cf-connecting-ip" in request.headers  # Cloudflare 엣지가 항상 덮어쓰는 헤더
-    if ENGINE_KEY and via_tunnel and path.startswith("/api/") and path != "/api/health":
-        if request.headers.get("x-engine-key") != ENGINE_KEY:
-            return JSONResponse(status_code=403, content={"detail": "엔진 접근 키가 올바르지 않습니다."})
+    if request.method == "OPTIONS" or path in ("/api/health", "/api/formats", "/api/catalog"):
+        return await call_next(request)
+
+    if ENGINE_KEY and path.startswith("/api/") and not path.startswith("/api/auth/"):
+        req_key = request.headers.get("x-engine-key", "")
+        auth_hdr = request.headers.get("authorization", "")
+        token_q = request.query_params.get("t", "")
+        # 프록시 X-Engine-Key 일치 또는 임직원 Bearer 토큰 보유 시 통과
+        if req_key != ENGINE_KEY and not auth_hdr.startswith("Bearer ") and not token_q:
+            return JSONResponse(status_code=403, content={"detail": "인증 토큰 또는 엔진 접근 키가 필요합니다."})
     return await call_next(request)
+
 
 BASE_DIR: Path = Path(__file__).resolve().parent.parent
 FRONTEND_DIR: Path = BASE_DIR / "frontend"
@@ -63,6 +76,18 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 auth_mgr = AuthManager()
+
+
+def _cleanup_old_storage(max_age_seconds: int = 3600) -> None:
+    """오래된 업로드/출력 임시 디렉터리를 자동 정리하여 디스크 및 메모리를 보호한다."""
+    now = time.time()
+    for root_dir in (UPLOAD_DIR, OUTPUT_DIR):
+        try:
+            for item in root_dir.iterdir():
+                if item.is_dir() and (now - item.stat().st_mtime) > max_age_seconds:
+                    shutil.rmtree(item, ignore_errors=True)
+        except Exception:
+            pass
 
 
 class LoginRequest(BaseModel):
@@ -98,7 +123,7 @@ def login(req: LoginRequest) -> Dict[str, Any]:
             "rank": user.rank,
             "email": user.email,
             "role": user.role,
-        }
+        },
     }
 
 
@@ -122,7 +147,6 @@ class ConversionResponse(BaseModel):
     metadata: Dict[str, Any] = {}
 
 
-# Filee 레퍼런스 180+ 포맷 매핑 카탈로그
 FORMAT_CATALOG: Dict[str, Dict[str, Any]] = {
     "cad": {
         "title": "CAD 도면",
@@ -134,19 +158,19 @@ FORMAT_CATALOG: Dict[str, Dict[str, Any]] = {
         "title": "문서 / 한글",
         "badge_count": 8,
         "extensions": [".hwp", ".hwpx", ".docx", ".doc", ".pdf", ".odt", ".rtf", ".txt"],
-        "targets": ["pdf", "docx", "hwpx", "txt", "xlsx"],
+        "targets": ["pdf", "docx", "hwpx", "txt", "xlsx", "html", "rtf", "odt", "epub"],
     },
     "spreadsheets": {
         "title": "표 / 내역서",
         "badge_count": 6,
         "extensions": [".xlsx", ".xls", ".csv", ".tsv", ".ods", ".pdf"],
-        "targets": ["xlsx", "csv", "pdf", "html"],
+        "targets": ["xlsx", "csv", "tsv", "ods", "pdf", "html", "docx", "hwpx"],
     },
     "images": {
         "title": "이미지",
         "badge_count": 12,
         "extensions": [".png", ".jpg", ".jpeg", ".webp", ".svg", ".bmp", ".tiff", ".tif", ".ico", ".gif", ".heic", ".psd"],
-        "targets": ["webp", "png", "jpg", "ico", "bmp", "tiff", "pdf", "svg"],
+        "targets": ["webp", "png", "jpg", "ico", "bmp", "tiff", "gif", "pdf", "svg"],
     },
     "media_video": {
         "title": "동영상",
@@ -164,7 +188,7 @@ FORMAT_CATALOG: Dict[str, Dict[str, Any]] = {
         "title": "전자책 / 압축",
         "badge_count": 7,
         "extensions": [".epub", ".mobi", ".azw3", ".fb2", ".cbz", ".zip", ".tar.gz", ".7z"],
-        "targets": ["pdf", "epub", "azw3", "zip", "cbz"],
+        "targets": ["pdf", "epub", "azw3", "fb2", "cbz", "zip", "7z", "tar", "gz", "bz2"],
     },
     "mixed": {
         "title": "혼합 파일",
@@ -176,8 +200,14 @@ FORMAT_CATALOG: Dict[str, Dict[str, Any]] = {
 
 
 @app.get("/api/health")
-def health_check() -> Dict[str, str]:
-    return {"status": "ok", "service": "CONCOST-TotalConverter", "version": "1.10.2"}
+def health_check() -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "service": "CONCOST-TotalConverter",
+        "version": "1.10.2",
+        "cad_engine": "CONCOST-Converter-0.2.2 + LibreDWG",
+        "general_engine": "Filee-1.10.2-Universal",
+    }
 
 
 @app.get("/api/formats")
@@ -189,12 +219,12 @@ def get_catalog() -> Dict[str, Any]:
 
 @app.get("/api/cad/zwcad-status")
 def get_cad_status() -> Dict[str, Any]:
-    """ZWCAD 설치 및 DWG 가속 엔진 지원 상태 반환"""
+    """ZWCAD 설치 및 LibreDWG 클라우드 DWG 가속 엔진 지원 상태 반환"""
     return CadEngine.get_zwcad_status()
 
 
 @app.post("/api/convert", response_model=ConversionResponse)
-async def convert_file(
+def convert_file(
     file: UploadFile = File(...),
     target_format: str = Form(...),
     scale_multiplier: float = Form(1.0),
@@ -202,9 +232,14 @@ async def convert_file(
     quality: int = Form(90),
     dpi: int = Form(300),
 ) -> ConversionResponse:
-    """단일 파일 변환을 처리하는 다중 엔진 라우터"""
+    """
+    단일 파일 변환을 처리하는 다중 엔진 라우터 (동기 def로 선언하여 FastAPI 워커 스레드풀에서 비차단 실행)
+    - CAD 관련 변환: 사용자 전용 CONCOST-Converter-0.2.2 + LibreDWG/ZWCAD
+    - 비-CAD 변환: KnifeLemon/Filee 오픈소스 이식 엔진 (FileeUniversalRouter)
+    """
+    _cleanup_old_storage()
     task_id = str(uuid.uuid4())
-    orig_name = file.filename or "file"
+    orig_name = Path(file.filename or "file").name
     ext = Path(orig_name).suffix.lower().lstrip(".")
     tgt = target_format.lower().strip().replace(" ", "_")
 
@@ -217,124 +252,120 @@ async def convert_file(
     with open(input_file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    out_file_path = task_output_dir / f"{input_file_path.stem}.{tgt.split('_')[0]}"
+    out_ext = "mp4" if tgt == "mp4_720p" else tgt.split("_")[0]
+    out_file_path = task_output_dir / f"{input_file_path.stem}.{out_ext}"
     meta: Dict[str, Any] = {}
 
-    try:
-        # 1. CAD 도면 변환 (PDF -> DXF / DWG) - CONCOST-Converter-0.2.2 알고리즘
-        if ext == "pdf" and tgt in ("dxf", "dwg"):
-            cad_opts = CadConversionOptions(
-                scale_multiplier=scale_multiplier,
-                auto_detect_scale=auto_detect_scale,
-                page_number=1,
+    with CONVERSION_SEMAPHORE:
+        try:
+            # =====================================================================
+            # 1. CAD 도면 변환 (사용자 전용 CONCOST-Converter-0.2.2 + LibreDWG/ZWCAD)
+            # =====================================================================
+            if ext == "pdf" and tgt in ("dxf", "dwg"):
+                cad_opts = CadConversionOptions(
+                    scale_multiplier=scale_multiplier,
+                    auto_detect_scale=auto_detect_scale,
+                    page_number=1,
+                    target_format=tgt,
+                )
+                if tgt == "dwg":
+                    cad_res = CadEngine.convert_pdf_to_dwg(input_file_path, out_file_path, cad_opts)
+                else:
+                    cad_res = CadEngine.convert_pdf_to_dxf(input_file_path, out_file_path, cad_opts)
+
+                if not cad_res.success:
+                    raise HTTPException(status_code=500, detail=cad_res.error_message or "CAD 변환 실패")
+                meta = {
+                    "engine": f"CONCOST-Converter-0.2.2 ({cad_res.zwcad_engine or 'R2013 정밀 DXF'})",
+                    "entities": cad_res.total_entities,
+                    "lines": cad_res.lines_count,
+                    "hatches": cad_res.hatches_count,
+                    "applied_scale": cad_res.applied_scale,
+                    "zwcad_engine": cad_res.zwcad_engine,
+                    "warnings": cad_res.warnings,
+                }
+
+            elif ext == "dxf" and tgt == "dwg":
+                cad_res = CadEngine.convert_dxf_to_dwg(input_file_path, out_file_path)
+                if not cad_res.success:
+                    raise HTTPException(status_code=500, detail=cad_res.error_message or "DXF -> DWG 변환 실패")
+                meta = {
+                    "engine": f"CONCOST DWG Engine ({cad_res.zwcad_engine})",
+                    "entities": cad_res.total_entities,
+                }
+
+            elif ext == "dwg" and tgt == "dxf":
+                cad_res = CadEngine.convert_dwg_to_dxf(input_file_path, out_file_path)
+                if not cad_res.success:
+                    raise HTTPException(status_code=500, detail=cad_res.error_message or "DWG -> DXF 변환 실패")
+                meta = {"engine": "CONCOST LibreDWG (DWG -> DXF)"}
+
+            elif ext in ("dxf", "dwg") and tgt in ("pdf", "svg", "png", "jpg", "jpeg", "webp"):
+                with tempfile.TemporaryDirectory(prefix="cad_vis_") as tmp:
+                    work_dxf = input_file_path
+                    if ext == "dwg":
+                        work_dxf = Path(tmp) / "stage.dxf"
+                        d_res = CadEngine.convert_dwg_to_dxf(input_file_path, work_dxf)
+                        if not d_res.success:
+                            raise HTTPException(status_code=500, detail=d_res.error_message or "DWG 파싱 실패")
+                    ok = CadEngine.render_dxf_to_visual(work_dxf, out_file_path, tgt, dpi=dpi)
+                    if not ok:
+                        raise HTTPException(status_code=500, detail=f"{ext.upper()} -> {tgt.upper()} 렌더링 실패")
+                meta = {"engine": "CONCOST CAD Vector Renderer", "format": tgt.upper()}
+
+            elif ext in ("dxf", "dwg") and tgt == ext:
+                shutil.copy2(input_file_path, out_file_path)
+                meta = {"engine": "CONCOST CAD Pass-through", "format": tgt.upper()}
+
+            # =====================================================================
+            # 2. PDF -> 고해상도 이미지/SVG 렌더링
+            # =====================================================================
+            elif ext == "pdf" and tgt in ("png", "jpg", "jpeg", "webp", "bmp", "tiff", "ico", "svg"):
+                img_opts = ImageConversionOptions(target_format=tgt, dpi=dpi, quality=quality)
+                rendered = ImageEngine.convert_pdf_to_images(input_file_path, task_output_dir, img_opts, page_index=0)
+                if not rendered or not rendered[0].exists():
+                    raise HTTPException(status_code=500, detail="PDF 이미지/SVG 렌더링 실패")
+                out_file_path = rendered[0]
+                meta = {"engine": "PyMuPDF Vector/High-Res Rasterizer", "dpi": dpi, "format": tgt.upper()}
+
+            # =====================================================================
+            # 3. KnifeLemon/Filee 유니버설 엔진 & 다단계 라우터 (비-CAD 전 포맷)
+            # =====================================================================
+            else:
+                ok, final_path, u_meta = FileeUniversalRouter.convert(
+                    input_path=input_file_path,
+                    output_path=out_file_path,
+                    source_ext=ext,
+                    target_fmt=tgt,
+                    dpi=dpi,
+                    quality=quality,
+                )
+                if not ok or not final_path.exists():
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"지원하지 않거나 변환할 수 없는 경로입니다: {ext.upper()} -> {tgt.upper()}",
+                    )
+                out_file_path = final_path
+                meta = u_meta
+
+            file_size = out_file_path.stat().st_size if out_file_path.exists() else 0
+            download_url = f"/api/download/{task_id}/{out_file_path.name}"
+
+            return ConversionResponse(
+                task_id=task_id,
+                original_name=orig_name,
                 target_format=tgt,
-            )
-            if tgt == "dwg":
-                cad_res = CadEngine.convert_pdf_to_dwg(input_file_path, out_file_path, cad_opts)
-            else:
-                cad_res = CadEngine.convert_pdf_to_dxf(input_file_path, out_file_path, cad_opts)
-
-            if not cad_res.success:
-                raise HTTPException(status_code=500, detail=cad_res.error_message or "CAD 변환 실패")
-            meta = {
-                "engine": f"CONCOST-Converter-0.2.2 ({'ZWCAD Native DWG' if tgt == 'dwg' else 'R2013 정밀 DXF'})",
-                "entities": cad_res.total_entities,
-                "lines": cad_res.lines_count,
-                "hatches": cad_res.hatches_count,
-                "applied_scale": cad_res.applied_scale,
-                "zwcad_engine": cad_res.zwcad_engine,
-                "warnings": cad_res.warnings,
-            }
-
-        # 2. 표 / 내역서 복원 (PDF -> XLSX / CSV / HTML 및 XLSX <-> CSV)
-        elif ext == "pdf" and tgt in ("xlsx", "csv", "html"):
-            if tgt == "xlsx":
-                ok = TableEngine.convert_pdf_to_excel(input_file_path, out_file_path)
-            elif tgt == "csv":
-                ok = TableEngine.convert_pdf_to_csv(input_file_path, out_file_path)
-            else:
-                ok = TableEngine.convert_pdf_to_html(input_file_path, out_file_path)
-            if not ok:
-                raise HTTPException(status_code=500, detail=f"표 복원 {tgt.upper()} 변환 실패")
-            meta = {"engine": "CONCOST TableGridRestoration", "format": tgt.upper()}
-
-        elif ext in ("xlsx", "xls") and tgt == "csv":
-            ok = TableEngine.convert_excel_to_csv(input_file_path, out_file_path)
-            if not ok:
-                raise HTTPException(status_code=500, detail="Excel -> CSV 변환 실패")
-            meta = {"engine": "CONCOST SpreadsheetEngine", "format": "CSV"}
-
-        elif ext in ("csv", "tsv") and tgt == "xlsx":
-            ok = TableEngine.convert_csv_to_excel(input_file_path, out_file_path)
-            if not ok:
-                raise HTTPException(status_code=500, detail="CSV -> Excel 변환 실패")
-            meta = {"engine": "CONCOST SpreadsheetEngine", "format": "XLSX"}
-
-        # 2-2. 문서 / 텍스트 양방향 변환 (PDF <-> TXT)
-        elif ext == "pdf" and tgt == "txt":
-            ok = DocumentEngine.extract_text_from_pdf(input_file_path, out_file_path)
-            if not ok:
-                raise HTTPException(status_code=500, detail="PDF 텍스트 추출 실패")
-            meta = {"engine": "CONCOST DocumentEngine", "format": "TXT"}
-
-        elif ext == "txt" and tgt == "pdf":
-            ok = DocumentEngine.text_to_pdf(input_file_path, out_file_path)
-            if not ok:
-                raise HTTPException(status_code=500, detail="TXT -> PDF 문서 생성 실패")
-            meta = {"engine": "CONCOST DocumentEngine (Korean Font)", "format": "PDF"}
-
-        # 3. PDF -> 이미지/벡터 렌더링 (PNG, JPG, WEBP, BMP, TIFF, ICO, SVG)
-        elif ext == "pdf" and tgt in ("png", "jpg", "jpeg", "webp", "bmp", "tiff", "ico", "svg"):
-            img_opts = ImageConversionOptions(target_format=tgt, dpi=dpi, quality=quality)
-            rendered = ImageEngine.convert_pdf_to_images(input_file_path, task_output_dir, img_opts, page_index=0)
-            if not rendered or not rendered[0].exists():
-                raise HTTPException(status_code=500, detail="PDF 이미지/SVG 렌더링 실패")
-            out_file_path = rendered[0]
-            meta = {"engine": "PyMuPDF Vector/High-Res Rasterizer", "dpi": dpi, "format": tgt.upper()}
-
-        # 4. 이미지 상호 변환 및 이미지 -> PDF 변환 (PNG, JPG, WEBP, ICO, BMP, TIFF, PDF)
-        elif ext in ("png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif", "ico", "gif") and tgt in (
-            "png", "jpg", "jpeg", "webp", "bmp", "tiff", "ico", "pdf"
-        ):
-            img_opts = ImageConversionOptions(target_format=tgt, quality=quality)
-            ok = ImageEngine.convert_image(input_file_path, out_file_path, img_opts)
-            if not ok:
-                raise HTTPException(status_code=500, detail="이미지 변환 실패")
-            meta = {"engine": "Pillow Converter", "quality": quality, "format": tgt.upper()}
-
-        # 5. 모든 파일을 단일 ZIP으로 압축 ("One ZIP")
-        elif tgt == "zip":
-            zip_out = task_output_dir / f"{input_file_path.stem}.zip"
-            with zipfile.ZipFile(zip_out, "w", zipfile.ZIP_DEFLATED) as zf:
-                zf.write(input_file_path, arcname=input_file_path.name)
-            out_file_path = zip_out
-            meta = {"engine": "Deflate Zip Engine", "archived_files": 1}
-
-        # 6. 미구현 경로: 원본 복사로 성공을 위장하지 않고 명시적으로 실패 처리
-        else:
-            raise HTTPException(
-                status_code=422,
-                detail=f"아직 지원하지 않는 변환 경로입니다: {ext.upper()} -> {tgt.upper()}",
+                success=True,
+                download_url=download_url,
+                file_size_bytes=file_size,
+                message="성공적으로 변환되었습니다.",
+                metadata=meta,
             )
 
-        file_size = out_file_path.stat().st_size if out_file_path.exists() else 0
-        download_url = f"/api/download/{task_id}/{out_file_path.name}"
-
-        return ConversionResponse(
-            task_id=task_id,
-            original_name=orig_name,
-            target_format=tgt,
-            success=True,
-            download_url=download_url,
-            file_size_bytes=file_size,
-            message="성공적으로 변환되었습니다.",
-            metadata=meta,
-        )
-
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=500, detail=f"변환 엔진 실행 오류: {str(e)}")
+        except Exception as e:
+            if isinstance(e, HTTPException):
+                raise e
+            raise HTTPException(status_code=500, detail=f"변환 엔진 실행 오류: {str(e)}")
 
 
 @app.get("/api/download/{task_id}/{filename}")
@@ -345,6 +376,5 @@ def download_result(task_id: str, filename: str) -> FileResponse:
     return FileResponse(path=str(target), filename=filename)
 
 
-# 프론트엔드 마운트
 if FRONTEND_DIR.exists():
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")

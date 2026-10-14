@@ -150,6 +150,22 @@ def filled_geometry(paths, evenodd=False):
     return unary_union(selected)
 
 
+
+@lru_cache(maxsize=4096)
+def _cached_glyph_polygons(data: str, evenodd: bool, tol_Step: float):
+    """동일 폰트 글리프(data)의 평탄화 및 Shapely 다각형화를 캐싱하여 반복 연산을 제거한다."""
+    raw_paths = flatten(data, IDENTITY, tolerance=tol_Step)
+    if not raw_paths:
+        return (), ()
+    geom = filled_geometry(raw_paths, evenodd=evenodd)
+    polys = []
+    for poly in pieces(geom, "Polygon"):
+        ext_pts = tuple(poly.exterior.coords)
+        int_pts = tuple(tuple(r.coords) for r in poly.interiors)
+        polys.append((ext_pts, int_pts))
+    return tuple(raw_paths), tuple(polys)
+
+
 def pieces(geom, kind):
     if geom.is_empty:
         return
@@ -286,18 +302,36 @@ def convert(source, output, page_number=1, scale=1., progress=lambda s: None,
             return (p[0]*factor,(height-p[1])*factor)
 
         def emit(data, attrs, transform, clip, text=False):
-            paths = flatten(data,transform)
-            if not paths:
-                return
             bounds = clip.bounds
             if not bounds:
                 return
-            all_inside = all(bounds[0] <= x <= bounds[2] and bounds[1] <= y <= bounds[3]
-                             for p in paths for x,y in p) and clip.equals(box(*bounds))
             fill = color(attrs.get("fill","black"))
             stroke = color(attrs.get("stroke","none"))
+            evenodd = attrs.get("fill-rule") == "evenodd"
+            if text and stroke is None and fill is not None:
+                s_norm = max(0.05, round(max(math.hypot(transform[0], transform[1]), math.hypot(transform[2], transform[3])), 2))
+                raw_paths, cached_polys = _cached_glyph_polygons(data, evenodd, round(TOLERANCE_PT / s_norm, 5))
+                if not cached_polys:
+                    return
+                paths = [[point(transform, p) for p in rp] for rp in raw_paths]
+                all_inside = all(bounds[0] <= x <= bounds[2] and bounds[1] <= y <= bounds[3]
+                                 for p in paths for x,y in p) and clip.equals(box(*bounds))
+                if all_inside:
+                    for ext_pts, int_rings in cached_polys:
+                        hatch = msp.add_hatch(color=7, dxfattribs={
+                            "layer": "TEXT_OUTLINE", "true_color": rgb2int(fill)})
+                        hatch.paths.add_polyline_path([xy(point(transform, p)) for p in ext_pts], is_closed=True, flags=1)
+                        for ring in int_rings:
+                            hatch.paths.add_polyline_path([xy(point(transform, p)) for p in ring], is_closed=True, flags=0)
+                        counts["hatches"] += 1
+                    return
+            paths = flatten(data,transform)
+            if not paths:
+                return
+            all_inside = all(bounds[0] <= x <= bounds[2] and bounds[1] <= y <= bounds[3]
+                             for p in paths for x,y in p) and clip.equals(box(*bounds))
             if fill is not None:
-                geom = filled_geometry(paths,attrs.get("fill-rule")=="evenodd")
+                geom = filled_geometry(paths,evenodd)
                 if not all_inside:
                     geom = geom.intersection(clip)
                 for poly in pieces(geom,"Polygon"):

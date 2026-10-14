@@ -1,6 +1,8 @@
 
 // 클라우드 변환 엔진 사전 워밍업(Pre-warm)
-fetch('/api/health').catch(() => {});
+const CLOUD_DIRECT_ENGINE = "https://concost-converter-engine.onrender.com";
+fetch("/api/health").catch(() => {});
+fetch(`${CLOUD_DIRECT_ENGINE}/api/health`, { mode: "cors" }).catch(() => {});
 /**
  * CONCOST Total Studio - Filee 1.10.2 대시보드 & 사내 인증 & 워크프로세스 컨트롤러
  */
@@ -189,9 +191,10 @@ document.addEventListener("DOMContentLoaded", () => {
         zwBadge.style.borderColor = "rgba(148, 163, 184, 0.3)";
       }
     } catch (e) {
-      zwText.textContent = "⛔ 변환 엔진 오프라인";
-      zwBadge.style.borderColor = "rgba(239, 68, 68, 0.5)";
-      zwBadge.title = "사내 엔진 PC에서 start_engine.bat 실행 필요";
+      zwText.textContent = "⏳ 클라우드 엔진 연결 중...";
+      zwBadge.style.borderColor = "rgba(250, 204, 21, 0.5)";
+      zwBadge.title = "클라우드 엔진 워밍업 중입니다.";
+      setTimeout(checkZwcadStatus, 5000);
     }
   }
 
@@ -668,15 +671,73 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const startTime = performance.now();
 
-    // Pages 프록시(/api/convert) → Cloudflare Tunnel → 사내 PC CONCOST 엔진
-    apiFetch("/api/convert", { method: "POST", body: formData })
-      .then(async (res) => {
-        clearInterval(timer);
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.detail || `서버 변환 실패 (HTTP ${res.status})`);
-        return data;
-      })
+    // 클라우드 변환 요청 (프록시 타임아웃/절전 시 자동 워밍업 대기 및 클라우드 엔진 직결 폴백 수행)
+    async function runConvertWithRetry() {
+      const buildFormData = () => {
+        const fd = new FormData();
+        fd.append("file", file);
+        fd.append("target_format", target.toLowerCase());
+        if (scaleVal === "auto") {
+          fd.append("auto_detect_scale", "true");
+          fd.append("scale_multiplier", "1.0");
+        } else {
+          fd.append("auto_detect_scale", "false");
+          fd.append("scale_multiplier", scaleVal);
+        }
+        fd.append("dpi", selDpi.value);
+        return fd;
+      };
+
+      let lastErr = null;
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        try {
+          // 1차 시도: 대용량 CAD/일람표의 Cloudflare Worker 서브요청 타임아웃을 피하기 위해 클라우드 엔진 직결 또는 Pages 프록시 호출
+          const useDirect = attempt >= 2 || file.size > 150 * 1024;
+          const endpoint = useDirect ? `${CLOUD_DIRECT_ENGINE}/api/convert` : "/api/convert";
+          const res = await fetch(endpoint, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${authToken()}` },
+            body: buildFormData(),
+          });
+
+          if (res.status === 401 && !useDirect) {
+            forceRelogin("로그인이 만료되었습니다. 다시 로그인해주세요.");
+            throw new Error("인증 만료");
+          }
+
+          const data = await res.json().catch(() => ({}));
+          if (res.ok && data.success) {
+            data._usedDirect = useDirect;
+            return data;
+          }
+
+          if (res.status === 502 || res.status === 503 || res.status === 504 || data.retryable) {
+            statusEl.textContent = `엔진 준비 중 (${attempt}/4)...`;
+            metaEl.textContent = `클라우드 변환 엔진 워밍업 중입니다. 자동으로 변환을 이어갑니다...`;
+            await fetch(`${CLOUD_DIRECT_ENGINE}/api/health`, { mode: "cors" }).catch(() => {});
+            await new Promise((r) => setTimeout(r, 3500));
+            continue;
+          }
+
+          throw new Error(data.detail || `서버 변환 실패 (HTTP ${res.status})`);
+        } catch (err) {
+          lastErr = err;
+          if (attempt < 4 && !String(err.message || "").includes("지원하지 않")) {
+            statusEl.textContent = `자동 재시도 (${attempt}/4)...`;
+            metaEl.textContent = `클라우드 엔진 연결 대기 중... 자동으로 재시도합니다.`;
+            await fetch(`${CLOUD_DIRECT_ENGINE}/api/health`, { mode: "cors" }).catch(() => {});
+            await new Promise((r) => setTimeout(r, 3500));
+            continue;
+          }
+          throw err;
+        }
+      }
+      throw lastErr || new Error("변환 서버 응답 지연");
+    }
+
+    runConvertWithRetry()
       .then((data) => {
+        clearInterval(timer);
         const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
         fillEl.style.width = "100%";
         card.classList.add("done");
@@ -684,12 +745,12 @@ document.addEventListener("DOMContentLoaded", () => {
         statusEl.textContent = "변환 완료";
 
         const m = data.metadata || {};
-        const detail = m.entities != null ? ` · 객체 ${m.entities}개` : "";
+        const detail = m.entities != null ? ` · 객체 ${m.entities}개` : (m.route ? ` · ${m.route}` : "");
         metaEl.textContent = `${(data.file_size_bytes / 1024).toFixed(1)} KB · ${elapsed}초 · ${m.engine || ""}${detail}`;
 
-        // <a download>은 헤더를 못 붙이므로 토큰을 쿼리로 전달 (프록시에서 제거 후 전달)
-        const sep = data.download_url.includes("?") ? "&" : "?";
-        const link = `${data.download_url}${sep}t=${encodeURIComponent(authToken())}`;
+        const baseDownload = data._usedDirect ? `${CLOUD_DIRECT_ENGINE}${data.download_url}` : data.download_url;
+        const sep = baseDownload.includes("?") ? "&" : "?";
+        const link = `${baseDownload}${sep}t=${encodeURIComponent(authToken())}`;
         const outName = data.download_url.split("/").pop();
         actionsEl.innerHTML = `<a href="${link}" download="${decodeURIComponent(outName)}" class="card-btn-download">다운로드 ➔</a>`;
         queueStatusText.textContent = "변환 완료";
