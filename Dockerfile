@@ -2,10 +2,10 @@
 FROM python:3.11-slim-bookworm AS dwg-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git build-essential autoconf automake libtool pkg-config texinfo ca-certificates \
-    && git clone --depth 1 --branch 0.14 https://github.com/LibreDWG/libredwg.git /tmp/libredwg \
+    build-essential curl xz-utils ca-certificates \
+    && mkdir -p /tmp/libredwg \
+    && curl -fsSL "https://github.com/LibreDWG/libredwg/releases/download/0.14/libredwg-0.14.tar.xz" | tar -xJ -C /tmp/libredwg --strip-components=1 \
     && cd /tmp/libredwg \
-    && sh ./autogen.sh \
     && ./configure --disable-bindings --disable-doc --enable-shared=no \
     && make -j$(nproc) -C src \
     && make -j$(nproc) -C programs dwgwrite dwgread \
@@ -35,7 +35,6 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY backend /app/backend
 COPY frontend /app/frontend
-COPY CONNECT_TALK_직원계정.xlsx /app/CONNECT_TALK_직원계정.xlsx
 
 RUN mkdir -p /app/storage/uploads /app/storage/outputs
 
