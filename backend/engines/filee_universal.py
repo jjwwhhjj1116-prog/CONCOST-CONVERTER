@@ -756,7 +756,11 @@ class FileePdfWriter:
 
         if len(pdf) == 0:
             pdf.new_page(width=595, height=842)
-        pdf.save(str(output_path))
+        try:
+            pdf.subset_fonts()
+        except Exception:
+            pass
+        pdf.save(str(output_path), garbage=4, deflate=True)
         pdf.close()
         return output_path.exists() and output_path.stat().st_size > 0
 
