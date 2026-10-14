@@ -11,7 +11,7 @@ import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
 from backend.engines.cad.concost_converter import convert as concost_pdf_to_dxf
-from backend.engines.cad.concost_dwg import convert_dwg as concost_dxf_to_dwg, installed_zwcad
+from backend.engines.cad.concost_dwg import convert_dwg as concost_dxf_to_dwg, find_libredwg_binary, installed_zwcad
 from backend.engines.cad.scale_detection import detect_scale as concost_detect_scale
 
 
@@ -47,9 +47,18 @@ class CadEngine:
 
     @classmethod
     def get_zwcad_status(cls) -> Dict[str, Any]:
-        """로컬 시스템의 ZWCAD 설치 및 COM API 연동 상태 조회"""
+        """ZWCAD COM API 또는 LibreDWG 클라우드 DWG 엔진 상태 조회"""
         try:
             versions = installed_zwcad()
+            libredwg = find_libredwg_binary()
+            if libredwg is not None:
+                all_engines = ["LibreDWG-Cloud"] + versions
+                return {
+                    "available": True,
+                    "versions": all_engines,
+                    "default_engine": "LibreDWG-Cloud",
+                    "engine_type": "LibreDWG 0.14 Cloud Native DWG Engine",
+                }
             return {
                 "available": len(versions) > 0,
                 "versions": versions,

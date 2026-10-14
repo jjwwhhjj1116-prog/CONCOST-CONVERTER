@@ -78,7 +78,7 @@ def main(pdfs: list[Path]) -> int:
 
     for pdf in pdfs:
         print(f"\n== {pdf.name} ({source_stats(pdf)}) ==")
-        for tgt in ("dxf", "dwg"):
+        for tgt in ("dxf", "dwg", "xlsx", "csv", "txt", "svg", "png"):
             code, res = convert(token, pdf, tgt)
             if code != 200:
                 check(f"PDF→{tgt.upper()} 변환", False, f"HTTP {code} {res}", results)
@@ -102,11 +102,14 @@ def main(pdfs: list[Path]) -> int:
                     check("PDF→DXF", ok, f"{len(raw):,}B, 엔터티 {len(msp):,}개 {types}, audit오류 {len(audit.errors)}", results)
                 except Exception as e:
                     check("PDF→DXF", False, f"DXF 파싱 실패: {e}", results)
-            else:
+            elif tgt == "dwg":
                 sig = raw[:6].decode("ascii", errors="ignore")
                 ok = sig in DWG_SIGS
                 check("PDF→DWG", ok, f"{len(raw):,}B, 시그니처 {sig}, 엔진 {res['metadata'].get('zwcad_engine')}, "
                       f"재열기 객체 {res['metadata'].get('entities')}", results)
+            else:
+                ok = len(raw) > 20
+                check(f"PDF→{tgt.upper()}", ok, f"{len(raw):,}B, 엔진 {res.get('metadata', {}).get('engine')}", results)
 
     passed = sum(results)
     print(f"\n[결과] {passed}/{len(results)} PASS")

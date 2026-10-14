@@ -1,3 +1,6 @@
+
+// 클라우드 변환 엔진 사전 워밍업(Pre-warm)
+fetch('/api/health').catch(() => {});
 /**
  * CONCOST Total Studio - Filee 1.10.2 대시보드 & 사내 인증 & 워크프로세스 컨트롤러
  */

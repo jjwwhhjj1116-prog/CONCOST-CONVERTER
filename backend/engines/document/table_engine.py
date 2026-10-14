@@ -230,3 +230,83 @@ class TableEngine:
         wb.save(str(excel_path))
         wb.close()
         return True
+
+    @classmethod
+    def convert_pdf_to_csv(cls, pdf_path: Path, csv_path: Path, page_index: int = 0) -> bool:
+        """PDF 표를 복원하여 UTF-8 BOM CSV 파일로 변환 저장합니다."""
+        import csv
+
+        lines, texts = cls.extract_lines_and_texts(pdf_path, page_index)
+        tables = cls.recover_tables(lines, texts)
+
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.writer(f)
+            if not tables or not tables[0].grid:
+                for t in texts:
+                    writer.writerow([t["text"]])
+            else:
+                for row in tables[0].grid:
+                    writer.writerow(row)
+        return csv_path.exists() and csv_path.stat().st_size > 0
+
+    @classmethod
+    def convert_pdf_to_html(cls, pdf_path: Path, html_path: Path, page_index: int = 0) -> bool:
+        """PDF 표를 복원하여 웹 표준 HTML Table 문서로 변환 저장합니다."""
+        import html
+
+        lines, texts = cls.extract_lines_and_texts(pdf_path, page_index)
+        tables = cls.recover_tables(lines, texts)
+
+        html_path.parent.mkdir(parents=True, exist_ok=True)
+        rows_html: List[str] = []
+        if not tables or not tables[0].grid:
+            for t in texts:
+                rows_html.append(f"<tr><td>{html.escape(str(t['text']))}</td></tr>")
+        else:
+            for r_idx, row in enumerate(tables[0].grid):
+                tag = "th" if r_idx == 0 else "td"
+                cells = "".join(f"<{tag}>{html.escape(str(val))}</{tag}>" for val in row)
+                rows_html.append(f"<tr>{cells}</tr>")
+
+        doc_html = (
+            "<!DOCTYPE html><html lang='ko'><head><meta charset='UTF-8'>"
+            "<style>table{border-collapse:collapse;width:100%;font-family:'Malgun Gothic',sans-serif;font-size:13px;}"
+            "th,td{border:1px solid #a0a0a0;padding:6px 10px;text-align:left;}th{background:#f2f4f8;}</style>"
+            f"</head><body><table>{''.join(rows_html)}</table></body></html>"
+        )
+        html_path.write_text(doc_html, encoding="utf-8")
+        return html_path.exists() and html_path.stat().st_size > 0
+
+    @classmethod
+    def convert_excel_to_csv(cls, excel_path: Path, csv_path: Path) -> bool:
+        """XLSX 파일을 UTF-8 BOM CSV 파일로 변환합니다."""
+        import csv
+
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        wb = openpyxl.load_workbook(str(excel_path), data_only=True)
+        ws = wb.active
+        with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.writer(f)
+            for row in ws.iter_rows(values_only=True):
+                writer.writerow(["" if v is None else str(v) for v in row])
+        wb.close()
+        return csv_path.exists() and csv_path.stat().st_size > 0
+
+    @classmethod
+    def convert_csv_to_excel(cls, csv_path: Path, excel_path: Path) -> bool:
+        """CSV/TSV 파일을 서식이 적용된 XLSX 파일로 변환합니다."""
+        import csv
+
+        excel_path.parent.mkdir(parents=True, exist_ok=True)
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "변환된 표"
+        delimiter = "\t" if csv_path.suffix.lower() == ".tsv" else ","
+        with open(csv_path, "r", encoding="utf-8-sig", errors="ignore") as f:
+            reader = csv.reader(f, delimiter=delimiter)
+            for row in reader:
+                ws.append(row)
+        wb.save(str(excel_path))
+        wb.close()
+        return excel_path.exists() and excel_path.stat().st_size > 0

@@ -53,8 +53,7 @@ def run_cad_verification() -> bool:
     # 2. CAD 변환 엔진 구동
     options = CadConversionOptions(
         scale_multiplier=1.0,
-        auto_detect_scale=True,
-        include_text=True
+        auto_detect_scale=True
     )
     result = CadEngine.convert_pdf_to_dxf(sample_pdf, output_dxf, options)
 

@@ -398,7 +398,10 @@ def convert(source, output, page_number=1, scale=1., progress=lambda s: None,
                     stack[-1][0].remove(e)
         check()
         if raster_trace and image_info:
-            from raster_trace import trace_images
+            try:
+                from backend.engines.cad.raster_trace import trace_images
+            except ImportError:
+                from raster_trace import trace_images
             report['raster_trace'] = trace_images(page, msp, scale, check, details)
             counts['traced_entities'] = report['raster_trace']['entities']
             doc.layers.get('PDF_IMAGES').off()

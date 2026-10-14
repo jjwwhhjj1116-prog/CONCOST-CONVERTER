@@ -11,13 +11,14 @@ from typing import Any, Dict, List, Optional
 
 import openpyxl
 
-ACCOUNTS_EXCEL_PATHS = [
+BASE_DIR: Path = Path(__file__).resolve().parent.parent
+ACCOUNTS_EXCEL_PATHS: list[Path] = [
+    BASE_DIR / "CONNECT_TALK_직원계정.xlsx",
     Path("C:/Users/user-owner/Downloads/CONNECT_TALK_직원계정.xlsx"),
     Path("e:/CONNECT_TALK_직원계정.xlsx"),
-    Path("e:/■ 개발_TF팀/변환 토탈웹/CONNECT_TALK_직원계정.xlsx"),
 ]
 
-USERS_DB_PATH = Path("e:/■ 개발_TF팀/변환 토탈웹/storage/users_db.json")
+USERS_DB_PATH: Path = BASE_DIR / "storage" / "users_db.json"
 USERS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 

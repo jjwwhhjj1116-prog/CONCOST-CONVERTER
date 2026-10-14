@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from backend.auth import AuthManager
 from backend.engines.cad.cad_engine import CadConversionOptions, CadEngine
+from backend.engines.document.document_engine import DocumentEngine
 from backend.engines.document.table_engine import TableEngine
 from backend.engines.general.image_engine import ImageConversionOptions, ImageEngine
 
@@ -54,9 +55,10 @@ async def engine_key_guard(request, call_next):
             return JSONResponse(status_code=403, content={"detail": "엔진 접근 키가 올바르지 않습니다."})
     return await call_next(request)
 
-FRONTEND_DIR = Path("e:/■ 개발_TF팀/변환 토탈웹/frontend")
-UPLOAD_DIR = Path("e:/■ 개발_TF팀/변환 토탈웹/storage/uploads")
-OUTPUT_DIR = Path("e:/■ 개발_TF팀/변환 토탈웹/storage/outputs")
+BASE_DIR: Path = Path(__file__).resolve().parent.parent
+FRONTEND_DIR: Path = BASE_DIR / "frontend"
+UPLOAD_DIR: Path = BASE_DIR / "storage" / "uploads"
+OUTPUT_DIR: Path = BASE_DIR / "storage" / "outputs"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -178,6 +180,7 @@ def health_check() -> Dict[str, str]:
     return {"status": "ok", "service": "CONCOST-TotalConverter", "version": "1.10.2"}
 
 
+@app.get("/api/formats")
 @app.get("/api/catalog")
 def get_catalog() -> Dict[str, Any]:
     """Filee 레퍼런스 카탈로그 및 프로필 반환"""
@@ -243,31 +246,61 @@ async def convert_file(
                 "warnings": cad_res.warnings,
             }
 
-        # 2. 표 / 내역서 복원 (PDF -> XLSX / CSV)
-        elif ext == "pdf" and tgt in ("xlsx", "csv"):
-            ok = TableEngine.convert_pdf_to_excel(input_file_path, out_file_path)
+        # 2. 표 / 내역서 복원 (PDF -> XLSX / CSV / HTML 및 XLSX <-> CSV)
+        elif ext == "pdf" and tgt in ("xlsx", "csv", "html"):
+            if tgt == "xlsx":
+                ok = TableEngine.convert_pdf_to_excel(input_file_path, out_file_path)
+            elif tgt == "csv":
+                ok = TableEngine.convert_pdf_to_csv(input_file_path, out_file_path)
+            else:
+                ok = TableEngine.convert_pdf_to_html(input_file_path, out_file_path)
             if not ok:
-                raise HTTPException(status_code=500, detail="표 복원 Excel 변환 실패")
+                raise HTTPException(status_code=500, detail=f"표 복원 {tgt.upper()} 변환 실패")
             meta = {"engine": "CONCOST TableGridRestoration", "format": tgt.upper()}
 
-        # 3. PDF -> 이미지 렌더링 (PNG, JPG, WEBP, SVG)
-        elif ext == "pdf" and tgt in ("png", "jpg", "jpeg", "webp", "svg"):
+        elif ext in ("xlsx", "xls") and tgt == "csv":
+            ok = TableEngine.convert_excel_to_csv(input_file_path, out_file_path)
+            if not ok:
+                raise HTTPException(status_code=500, detail="Excel -> CSV 변환 실패")
+            meta = {"engine": "CONCOST SpreadsheetEngine", "format": "CSV"}
+
+        elif ext in ("csv", "tsv") and tgt == "xlsx":
+            ok = TableEngine.convert_csv_to_excel(input_file_path, out_file_path)
+            if not ok:
+                raise HTTPException(status_code=500, detail="CSV -> Excel 변환 실패")
+            meta = {"engine": "CONCOST SpreadsheetEngine", "format": "XLSX"}
+
+        # 2-2. 문서 / 텍스트 양방향 변환 (PDF <-> TXT)
+        elif ext == "pdf" and tgt == "txt":
+            ok = DocumentEngine.extract_text_from_pdf(input_file_path, out_file_path)
+            if not ok:
+                raise HTTPException(status_code=500, detail="PDF 텍스트 추출 실패")
+            meta = {"engine": "CONCOST DocumentEngine", "format": "TXT"}
+
+        elif ext == "txt" and tgt == "pdf":
+            ok = DocumentEngine.text_to_pdf(input_file_path, out_file_path)
+            if not ok:
+                raise HTTPException(status_code=500, detail="TXT -> PDF 문서 생성 실패")
+            meta = {"engine": "CONCOST DocumentEngine (Korean Font)", "format": "PDF"}
+
+        # 3. PDF -> 이미지/벡터 렌더링 (PNG, JPG, WEBP, BMP, TIFF, ICO, SVG)
+        elif ext == "pdf" and tgt in ("png", "jpg", "jpeg", "webp", "bmp", "tiff", "ico", "svg"):
             img_opts = ImageConversionOptions(target_format=tgt, dpi=dpi, quality=quality)
             rendered = ImageEngine.convert_pdf_to_images(input_file_path, task_output_dir, img_opts, page_index=0)
             if not rendered or not rendered[0].exists():
-                raise HTTPException(status_code=500, detail="PDF 이미지 렌더링 실패")
+                raise HTTPException(status_code=500, detail="PDF 이미지/SVG 렌더링 실패")
             out_file_path = rendered[0]
-            meta = {"engine": "PyMuPDF High-Res Rasterizer", "dpi": dpi}
+            meta = {"engine": "PyMuPDF Vector/High-Res Rasterizer", "dpi": dpi, "format": tgt.upper()}
 
-        # 4. 이미지 상호 변환 (PNG, JPG, WEBP, ICO, BMP, TIFF 등)
+        # 4. 이미지 상호 변환 및 이미지 -> PDF 변환 (PNG, JPG, WEBP, ICO, BMP, TIFF, PDF)
         elif ext in ("png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif", "ico", "gif") and tgt in (
-            "png", "jpg", "jpeg", "webp", "bmp", "tiff", "ico"
+            "png", "jpg", "jpeg", "webp", "bmp", "tiff", "ico", "pdf"
         ):
             img_opts = ImageConversionOptions(target_format=tgt, quality=quality)
             ok = ImageEngine.convert_image(input_file_path, out_file_path, img_opts)
             if not ok:
                 raise HTTPException(status_code=500, detail="이미지 변환 실패")
-            meta = {"engine": "Pillow Converter", "quality": quality}
+            meta = {"engine": "Pillow Converter", "quality": quality, "format": tgt.upper()}
 
         # 5. 모든 파일을 단일 ZIP으로 압축 ("One ZIP")
         elif tgt == "zip":

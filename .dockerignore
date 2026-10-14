@@ -1,0 +1,11 @@
+.git
+.agents
+.wrangler
+node_modules
+__pycache__
+*.pyc
+storage/uploads/*
+storage/outputs/*
+backend/bin/*.exe
+backend/bin/*.dll
+*.log

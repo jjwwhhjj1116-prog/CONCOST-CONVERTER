@@ -46,10 +46,14 @@ Thumbs.db
 .env*
 !.env.example
 
-# 엔진 비밀키
+#  키
 .engine.env
 storage/users_db.json
 .wrangler/
 CONNECT_TALK_*.xlsx
 backend/tests/e2e_out/
 schema.sql
+backend/bin/
+.agents/
+storage/outputs/
+storage/uploads/

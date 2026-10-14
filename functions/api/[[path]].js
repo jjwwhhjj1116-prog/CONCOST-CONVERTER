@@ -1,42 +1,60 @@
-// /api/* 중 auth/engine 외 나머지(convert, download, cad/zwcad-status, health)를
-// Cloudflare Tunnel 뒤의 사내 PC 변환 엔진(FastAPI)으로 프록시
+// /api/* 요청을 클라우드 변환 엔진(Render Docker)으로 프록시 (사내 PC 실행 불필요)
 import { json, verifyToken } from "../_shared.js";
+
+const DEFAULT_CLOUD_ENGINE = "https://concost-converter-engine.onrender.com";
 
 export async function onRequest(context) {
   const { request, env } = context;
   const url = new URL(request.url);
 
-  // 직원 로그인 토큰 검사 (헤더 또는 다운로드 링크용 ?t= 쿼리)
-  const auth = request.headers.get("Authorization") || "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7) : url.searchParams.get("t");
-  const user = await verifyToken(env, token);
-  if (!user) return json({ detail: "로그인이 필요합니다. 다시 로그인해주세요." }, 401);
+  // 헬스체크(/api/health)는 로그인 없이도 컨테이너 워밍업(Pre-warm) 허용
+  let user = "anonymous";
+  if (url.pathname !== "/api/health") {
+    const auth = request.headers.get("Authorization") || "";
+    const token = auth.startsWith("Bearer ") ? auth.slice(7) : url.searchParams.get("t");
+    user = await verifyToken(env, token);
+    if (!user) return json({ detail: "로그인이 필요합니다. 다시 로그인해주세요." }, 401);
+  }
 
-  // 사내 PC가 기동 시 등록한 터널 주소 조회
-  const row = await env.DB.prepare("SELECT value, updated_at FROM engine_registry WHERE key = 'url'").first();
-  if (!row) return json({ detail: "변환 엔진(사내 PC)이 등록되지 않았습니다. start_engine.bat 실행 여부를 확인하세요." }, 503);
+  // D1 레지스트리 조회 후, 없거나 죽은 터널이면 항상 클라우드 엔진(DEFAULT_CLOUD_ENGINE) 사용
+  const row = await env.DB.prepare("SELECT value FROM engine_registry WHERE key = 'url'").first().catch(() => null);
+  const candidates = [];
+  if (row && row.value && !row.value.includes("trycloudflare.com")) {
+    candidates.push(row.value.replace(/\/+$/, ""));
+  }
+  if (!candidates.includes(DEFAULT_CLOUD_ENGINE)) {
+    candidates.push(DEFAULT_CLOUD_ENGINE);
+  }
 
   url.searchParams.delete("t");
-  const target = `${row.value.replace(/\/+$/, "")}${url.pathname}${url.search}`;
-
   const headers = new Headers(request.headers);
   headers.delete("Authorization");
   headers.delete("host");
   headers.set("X-Engine-Key", env.ENGINE_KEY);
   headers.set("X-Concost-User", user);
 
-  try {
-    const resp = await fetch(target, {
-      method: request.method,
-      headers,
-      body: ["GET", "HEAD"].includes(request.method) ? undefined : request.body,
-    });
-    return new Response(resp.body, { status: resp.status, headers: resp.headers });
-  } catch (err) {
-    return json({
-      detail: "사내 변환 엔진에 연결할 수 없습니다. 엔진 PC가 켜져 있고 start_engine.bat이 실행 중인지 확인하세요.",
-      engine_registered_at: row.updated_at,
-      error: String(err),
-    }, 502);
+  const reqBody = ["GET", "HEAD"].includes(request.method) ? undefined : await request.arrayBuffer();
+
+  let lastError = null;
+  for (const base of candidates) {
+    const target = `${base}${url.pathname}${url.search}`;
+    try {
+      const resp = await fetch(target, {
+        method: request.method,
+        headers,
+        body: reqBody,
+      });
+      if (resp.status !== 530 && resp.status !== 502) {
+        return new Response(resp.body, { status: resp.status, headers: resp.headers });
+      }
+      lastError = `HTTP ${resp.status} from ${base}`;
+    } catch (err) {
+      lastError = String(err);
+    }
   }
+
+  return json({
+    detail: "클라우드 변환 엔진이 절전 모드에서 깨어나는 중입니다(약 20초 소요). 잠시 후 다시 시도해주세요.",
+    error: lastError,
+  }, 503);
 }
