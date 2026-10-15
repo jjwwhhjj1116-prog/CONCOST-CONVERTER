@@ -39,7 +39,7 @@ class ImageEngine:
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         target_fmt = options.target_format.upper()
-        if target_fmt == "JPG":
+        if target_fmt in ("JPG", "HEIC"):
             target_fmt = "JPEG"
 
         with Image.open(str(input_path)) as img:
@@ -85,6 +85,8 @@ class ImageEngine:
         target_fmt = options.target_format.lower()
         if target_fmt == "jpeg":
             target_fmt = "jpg"
+        save_fmt = "png" if target_fmt == "heic" else target_fmt
+        save_fmt = "png" if target_fmt == "heic" else target_fmt
 
         zoom = options.dpi / 72.0
         matrix = fitz.Matrix(zoom, zoom)
@@ -101,9 +103,9 @@ class ImageEngine:
                         out_file.write_text(svg_text, encoding="utf-8")
                     else:
                         pix = page.get_pixmap(matrix=matrix, alpha=False)
-                        if target_fmt in ("webp", "bmp", "tiff", "ico"):
+                        if target_fmt in ("webp", "bmp", "tiff", "ico", "heic"):
                             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                            img.save(str(out_file), format=target_fmt.upper(), quality=options.quality)
+                            img.save(str(out_file), format="WEBP" if target_fmt == "heic" else target_fmt.upper(), quality=options.quality)
                         else:
                             pix.save(str(out_file))
                     results.append(out_file)

@@ -317,6 +317,60 @@ def convert_file(
                 shutil.copy2(input_file_path, out_file_path)
                 meta = {"engine": "CONCOST CAD Pass-through", "format": tgt.upper()}
 
+            elif tgt in ("stl", "obj", "step", "iges", "dgn"):
+                with tempfile.TemporaryDirectory(prefix="cad_3d_") as tmp:
+                    work_dxf = Path(tmp) / "stage.dxf"
+                    if ext == "dxf":
+                        work_dxf = input_file_path
+                    elif ext == "dwg":
+                        d_res = CadEngine.convert_dwg_to_dxf(input_file_path, work_dxf)
+                        if not d_res.success:
+                            raise HTTPException(status_code=500, detail=d_res.error_message or "DWG 파싱 실패")
+                    elif ext == "pdf":
+                        c_res = CadEngine.convert_pdf_to_dxf(
+                            input_file_path,
+                            work_dxf,
+                            CadConversionOptions(scale_multiplier=scale_multiplier, auto_detect_scale=auto_detect_scale),
+                        )
+                        if not c_res.success:
+                            raise HTTPException(status_code=500, detail=c_res.error_message or "PDF->DXF 실패")
+                    else:
+                        CadEngine.import_3d_or_exchange_to_dxf(input_file_path, work_dxf)
+
+                    ok = CadEngine.export_dxf_to_3d_or_exchange(work_dxf, out_file_path, tgt)
+                    if not ok:
+                        raise HTTPException(status_code=500, detail=f"3D/CAD 교환 포맷({tgt.upper()}) 생성 실패")
+                meta = {"engine": f"CONCOST 3D/Exchange Engine ({tgt.upper()})", "format": tgt.upper()}
+
+            elif ext in ("step", "stp", "iges", "igs", "stl", "obj", "dgn") and tgt in ("dxf", "dwg", "pdf", "svg", "png"):
+                with tempfile.TemporaryDirectory(prefix="cad_imp_") as tmp:
+                    stage_dxf = Path(tmp) / "imported.dxf"
+                    CadEngine.import_3d_or_exchange_to_dxf(input_file_path, stage_dxf)
+                    if tgt == "dxf":
+                        shutil.copy2(stage_dxf, out_file_path)
+                    elif tgt == "dwg":
+                        r_dwg = CadEngine.convert_dxf_to_dwg(stage_dxf, out_file_path)
+                        if not r_dwg.success:
+                            raise HTTPException(status_code=500, detail=r_dwg.error_message or "DWG 변환 실패")
+                    else:
+                        CadEngine.render_dxf_to_visual(stage_dxf, out_file_path, tgt, dpi=dpi)
+                meta = {"engine": "CONCOST 3D/Exchange Importer", "route": f"{ext.upper()} -> {tgt.upper()}"}
+
+            elif ext in ("png", "jpg", "jpeg", "webp", "bmp", "tiff") and tgt in ("dxf", "dwg"):
+                with tempfile.TemporaryDirectory(prefix="img_cad_") as tmp:
+                    stage_pdf = Path(tmp) / "raster_stage.pdf"
+                    ImageEngine.convert_image(
+                        input_file_path, stage_pdf, ImageConversionOptions(target_format="PDF", dpi=dpi)
+                    )
+                    cad_opts = CadConversionOptions(scale_multiplier=scale_multiplier, raster_trace=True, target_format=tgt)
+                    if tgt == "dwg":
+                        c_res = CadEngine.convert_pdf_to_dwg(stage_pdf, out_file_path, cad_opts)
+                    else:
+                        c_res = CadEngine.convert_pdf_to_dxf(stage_pdf, out_file_path, cad_opts)
+                    if not c_res.success:
+                        raise HTTPException(status_code=500, detail=c_res.error_message or "이미지->CAD 추적 실패")
+                meta = {"engine": "CONCOST Raster-to-CAD Tracer", "entities": c_res.total_entities}
+
             # =====================================================================
             # 2. PDF -> 고해상도 이미지/SVG 렌더링
             # =====================================================================

@@ -442,7 +442,16 @@ def convert(source, output, page_number=1, scale=1., progress=lambda s: None,
             doc.layers.get('RASTER_AREAS_REVIEW').off()
             warnings.add('이미지 추적선은 RASTER_TRACE_REVIEW 레이어입니다. 길이·연결·폐합을 검수 후 적산하세요. 원본 이미지 레이어는 꺼져 있습니다.')
         if not sum(counts[k] for k in ("lines","polylines","hatches","traced_entities")):
-            raise ValueError("편집 가능한 벡터가 없습니다. 스캔 도면 자동 추적은 미지원입니다.")
+            # 벡터 선분이 없는 스캔본(통이미지) PDF의 경우 자동으로 래스터 선분 추적(raster_trace) 폴백 실행
+            try:
+                from backend.engines.cad.raster_trace import trace_images
+            except ImportError:
+                from raster_trace import trace_images
+            report["raster_trace"] = trace_images(page, msp, scale, check, details)
+            counts["traced_entities"] = report["raster_trace"]["entities"]
+            warnings.add("벡터가 없는 스캔 도면이므로 자동 래스터 추적(RASTER_TRACE_REVIEW 레이어)을 수행했습니다.")
+        if not sum(counts[k] for k in ("lines","polylines","hatches","traced_entities")):
+            raise ValueError("편집 가능한 벡터나 이미지를 찾을 수 없습니다.")
         # Preserve raster logos as appearance-cropped PNGs. This also handles soft masks.
         # ponytail: per-image crops may include overlapping vectors; report, don't imply vectorization.
         assets = []
