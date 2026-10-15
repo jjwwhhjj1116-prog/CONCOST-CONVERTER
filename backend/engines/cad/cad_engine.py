@@ -45,6 +45,40 @@ class CadConversionResult:
 class CadEngine:
     """CONCOST-Converter-0.2.2 기반 통합 CAD 변환기"""
 
+    @staticmethod
+    def _sanitize_and_load_dxf(dxf_path: Path):
+        """dwgread 역변환 DXF의 이중 개행(\r\r\n) 및 Invalid handle 0 등을 자동 복구하여 ezdxf Document로 반환"""
+        import ezdxf
+        from ezdxf import recover
+        import re
+
+        raw_bytes = dxf_path.read_bytes()
+        if b"\r\r\n" in raw_bytes:
+            raw_bytes = raw_bytes.replace(b"\r\r\n", b"\n").replace(b"\r\n", b"\n")
+            dxf_path.write_bytes(raw_bytes)
+
+        try:
+            return ezdxf.readfile(str(dxf_path))
+        except Exception:
+            clean_bytes = raw_bytes.replace(b"\r\r\n", b"\n").replace(b"\r\n", b"\n")
+            raw_txt = clean_bytes.decode("utf-8", errors="ignore")
+            counter = 0x90000
+
+            def _repl(m: re.Match[str]) -> str:
+                nonlocal counter
+                counter += 1
+                return f"{m.group(1)}{counter:X}\n"
+
+            fixed_txt = re.sub(r"(^[ \t]*(?:5|105)\n)[ \t]*0\n", _repl, raw_txt, flags=re.MULTILINE)
+            dxf_path.write_bytes(fixed_txt.encode("utf-8"))
+            doc, _ = recover.readfile(str(dxf_path))
+            try:
+                doc.saveas(str(dxf_path))
+            except Exception:
+                pass
+            return doc
+
+
     @classmethod
     def get_zwcad_status(cls) -> Dict[str, Any]:
         """ZWCAD COM API 또는 LibreDWG 클라우드 DWG 엔진 상태 조회"""
@@ -281,6 +315,10 @@ class CadEngine:
             check=False,
         )
         if dxf_path.exists() and dxf_path.stat().st_size > 0:
+            try:
+                cls._sanitize_and_load_dxf(dxf_path)
+            except Exception:
+                pass
             return CadConversionResult(success=True, output_path=dxf_path, format="dxf", zwcad_engine="LibreDWG-dwgread")
         err = proc.stderr.decode("utf-8", errors="ignore")
         return CadConversionResult(success=False, output_path=dxf_path, format="dxf", error_message=err or "DWG->DXF 실패")
@@ -293,7 +331,7 @@ class CadEngine:
         from PIL import Image
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        doc = ezdxf.readfile(str(dxf_path))
+        doc = cls._sanitize_and_load_dxf(dxf_path)
         msp = doc.modelspace()
 
         segs: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
@@ -405,6 +443,10 @@ class CadEngine:
             check=False,
         )
         if dxf_path.exists() and dxf_path.stat().st_size > 0:
+            try:
+                cls._sanitize_and_load_dxf(dxf_path)
+            except Exception:
+                pass
             return CadConversionResult(success=True, output_path=dxf_path, format="dxf", zwcad_engine="LibreDWG-dwgread")
         err = proc.stderr.decode("utf-8", errors="ignore")
         return CadConversionResult(success=False, output_path=dxf_path, format="dxf", error_message=err or "DWG->DXF 실패")
@@ -417,7 +459,7 @@ class CadEngine:
         from PIL import Image
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        doc = ezdxf.readfile(str(dxf_path))
+        doc = cls._sanitize_and_load_dxf(dxf_path)
         msp = doc.modelspace()
 
         segs: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
@@ -529,6 +571,10 @@ class CadEngine:
             check=False,
         )
         if dxf_path.exists() and dxf_path.stat().st_size > 0:
+            try:
+                cls._sanitize_and_load_dxf(dxf_path)
+            except Exception:
+                pass
             return CadConversionResult(success=True, output_path=dxf_path, format="dxf", zwcad_engine="LibreDWG-dwgread")
         err = proc.stderr.decode("utf-8", errors="ignore")
         return CadConversionResult(success=False, output_path=dxf_path, format="dxf", error_message=err or "DWG->DXF 실패")
@@ -541,7 +587,7 @@ class CadEngine:
         from PIL import Image
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        doc = ezdxf.readfile(str(dxf_path))
+        doc = cls._sanitize_and_load_dxf(dxf_path)
         msp = doc.modelspace()
 
         segs: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
@@ -617,7 +663,7 @@ class CadEngine:
         import math
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        doc = ezdxf.readfile(str(dxf_path))
+        doc = cls._sanitize_and_load_dxf(dxf_path)
         msp = doc.modelspace()
 
         segs: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
