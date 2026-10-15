@@ -1273,22 +1273,27 @@ class FileeMediaConverter:
                 # 입력이 PDF나 문서일 경우 1페이지 이미지로 먼저 렌더링하여 비디오/썸네일 스트림 생성
                 if ext == "pdf" and tgt in cls.VIDEO_TARGETS:
                     imgs = ImageEngine.convert_pdf_to_images(
-                        input_path, Path(tmp), ImageConversionOptions(target_format="PNG", dpi=150), page_index=0
+                        input_path, Path(tmp), ImageConversionOptions(target_format="PNG", dpi=96), page_index=0
                     )
                     if imgs:
                         src_for_ff = imgs[0]
                         ext = "png"
 
                 if ext in ("png", "jpg", "jpeg", "webp", "bmp", "tiff") and tgt in cls.VIDEO_TARGETS:
-                    scale_flt = "scale=-2:720" if tgt == "mp4_720p" else "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+                    scale_flt = "scale='min(1280,trunc(iw/2)*2)':-2" if tgt != "mp4_720p" else "scale=-2:720"
                     cmd = [
-                        ffmpeg_bin, "-y", "-loop", "1", "-i", str(src_for_ff),
-                        "-t", "2", "-vf", scale_flt, "-pix_fmt", "yuv420p", str(output_path)
+                        ffmpeg_bin, "-y", "-framerate", "2", "-loop", "1", "-i", str(src_for_ff),
+                        "-t", "2", "-r", "2", "-threads", "1", "-vf", scale_flt, "-pix_fmt", "yuv420p",
                     ]
+                    if tgt in ("mp4", "mp4_720p", "mov", "mkv", "flv"):
+                        cmd.extend(["-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage"])
+                    cmd.append(str(output_path))
                 else:
-                    cmd = [ffmpeg_bin, "-y", "-i", str(src_for_ff)]
+                    cmd = [ffmpeg_bin, "-y", "-threads", "1", "-i", str(src_for_ff)]
                     if tgt == "mp4_720p":
                         cmd.extend(["-vf", "scale=-2:720"])
+                    if tgt in ("mp4", "mp4_720p", "mov", "mkv", "flv"):
+                        cmd.extend(["-c:v", "libx264", "-preset", "ultrafast"])
                     cmd.append(str(output_path))
 
                 proc = subprocess.run(cmd, capture_output=True, timeout=120, check=False)

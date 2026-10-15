@@ -420,6 +420,10 @@ def convert_file(
             if isinstance(e, HTTPException):
                 raise e
             raise HTTPException(status_code=500, detail=f"변환 엔진 실행 오류: {str(e)}")
+        finally:
+            import gc
+            shutil.rmtree(task_upload_dir, ignore_errors=True)
+            gc.collect()
 
 
 @app.get("/api/download/{task_id}/{filename}")
