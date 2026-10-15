@@ -356,6 +356,18 @@ class CadEngine:
                     for px, py in pts:
                         xs.append(px)
                         ys.append(py)
+                elif dxftype == "HATCH":
+                    for path in e.paths:
+                        verts = getattr(path, "vertices", None)
+                        if verts and len(verts) >= 2:
+                            pts = [(float(v[0]), float(v[1])) for v in verts]
+                            if getattr(path, "is_closed", True) and len(pts) > 2:
+                                pts.append(pts[0])
+                            for a, b in zip(pts, pts[1:]):
+                                segs.append((a, b))
+                            for px, py in pts:
+                                xs.append(px)
+                                ys.append(py)
             except Exception:
                 continue
 
@@ -484,6 +496,18 @@ class CadEngine:
                     for px, py in pts:
                         xs.append(px)
                         ys.append(py)
+                elif dxftype == "HATCH":
+                    for path in e.paths:
+                        verts = getattr(path, "vertices", None)
+                        if verts and len(verts) >= 2:
+                            pts = [(float(v[0]), float(v[1])) for v in verts]
+                            if getattr(path, "is_closed", True) and len(pts) > 2:
+                                pts.append(pts[0])
+                            for a, b in zip(pts, pts[1:]):
+                                segs.append((a, b))
+                            for px, py in pts:
+                                xs.append(px)
+                                ys.append(py)
             except Exception:
                 continue
 
@@ -612,6 +636,18 @@ class CadEngine:
                     for px, py in pts:
                         xs.append(px)
                         ys.append(py)
+                elif dxftype == "HATCH":
+                    for path in e.paths:
+                        verts = getattr(path, "vertices", None)
+                        if verts and len(verts) >= 2:
+                            pts = [(float(v[0]), float(v[1])) for v in verts]
+                            if getattr(path, "is_closed", True) and len(pts) > 2:
+                                pts.append(pts[0])
+                            for a, b in zip(pts, pts[1:]):
+                                segs.append((a, b))
+                            for px, py in pts:
+                                xs.append(px)
+                                ys.append(py)
             except Exception:
                 continue
 
